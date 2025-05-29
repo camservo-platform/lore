@@ -73,6 +73,11 @@ async def main():
         if not user_input:
             continue
 
+        if user_input.lower() in {"quit", "exit"}:
+            print("👋 Exiting the game. Goodbye!")
+            await Tortoise.close_connections()
+            break
+
         relevant_docs = await retriever.ainvoke(user_input)
         context = "\n\n".join(doc.page_content for doc in relevant_docs)
 
