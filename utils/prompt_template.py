@@ -30,7 +30,8 @@ Respond with a narrative followed by a JSON block like:
     "race": "...",
     "location": "...",
     "description": "...",
-    "inventory": ["..."]
+    "inventory": ["..."],
+    "is_npc": true  // optional: true for non-player characters
   }}
 }}
 
