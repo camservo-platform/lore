@@ -23,7 +23,7 @@
 ### Installation
 
 ```bash
-git clone https://github.com/yourusername/lore.git
+git clone https://github.com/camservo-platform/lore
 cd lore
 python -m venv .venv
 source .venv/bin/activate
