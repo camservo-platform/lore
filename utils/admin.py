@@ -1,7 +1,6 @@
 from utils.llm import get_mistral
 from utils.retriever import get_retriever_and_db
-from langchain_core.documents import Document
-from db.models import Character, Location, Event
+from db.models import Character
 
 # from utils.prompt_template import PROMPT_TEMPLATE
 from prompts.admin_prompt import ADMIN_PROMPT_TEMPLATE
