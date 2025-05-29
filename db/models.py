@@ -19,7 +19,9 @@ class Character(models.Model):
     name = fields.CharField(max_length=100)
     race = fields.CharField(max_length=50)
     description = fields.TextField()
-    player = fields.ForeignKeyField("models.Player", related_name="characters")
+    player = fields.ForeignKeyField(
+        "models.Player", related_name="characters", null=True
+    )
     location = fields.ForeignKeyField("models.Location", related_name="characters")
 
 

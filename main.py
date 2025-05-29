@@ -40,13 +40,15 @@ async def process_game_events(json_data, player):
         # Ensure location exists
         location, _ = await Location.get_or_create(name=char["location"])
 
+        is_npc = char.get("is_npc", False)
+
         await Character.get_or_create(
             name=char["name"],
             defaults={
                 "race": char.get("race", "unknown"),
                 "description": char.get("description", "mysterious figure"),
                 "location": location,
-                "player": player,
+                "player": None if is_npc else player,
             },
         )
 
@@ -96,7 +98,6 @@ async def main():
         relevant_docs = await retriever.ainvoke(user_input)
         context = "\n\n".join(doc.page_content for doc in relevant_docs)
 
-        world = await World.first()
         prompt = PROMPT_TEMPLATE.format(
             user_input=user_input,
             context=context,
