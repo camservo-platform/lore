@@ -1,66 +1,78 @@
-# main.py
 import asyncio
-import json
 from tortoise import Tortoise
-from db.models import Character, Location, Event
+from db.models import Player, Character, Location, Event, World
 from utils.llm import get_mistral
-from langchain_chroma import Chroma
-from langchain_ollama import OllamaEmbeddings
+from utils.retrieval import get_retriever
+from utils.prompt_template import PROMPT_TEMPLATE
+
 
 async def main():
     await Tortoise.init(db_url="sqlite://world.db", modules={"models": ["db.models"]})
     await Tortoise.generate_schemas()
 
-    llm = get_mistral()
-    retriever = Chroma(
-        persist_directory=".chroma",
-        embedding_function=OllamaEmbeddings(model="mistral")
-    ).as_retriever()
-
     print("Welcome to your D&D world!")
 
+    # Get or create player
+    player_name = input("Enter your player name: ").strip()
+    player, _ = await Player.get_or_create(name=player_name)
+
+    print("\nCreating a new character...")
+    name = input("Character name: ").strip()
+
+    races = ["human", "elf", "orc", "dwarf", "halfling"]
+    print("\nChoose a race:")
+    for r in races:
+        print(f"- {r}")
     while True:
-        user_input = input("You: ")
-        if user_input.lower() in ["quit", "exit"]:
+        race = input("Character race: ").strip().lower()
+        if race in races:
             break
+        print("❌ Invalid race. Please choose from the list above.")
 
-        relevant = retriever.get_relevant_documents(user_input)
-        context = "\n".join(doc.page_content for doc in relevant)
+    locations = await Location.all()
+    print("\nAvailable starting locations:")
+    for loc in locations:
+        print(f"- {loc.name}")
+    location = None
+    while not location:
+        choice = input("Starting location: ").strip()
+        location = next((loc for loc in locations if loc.name == choice), None)
+        if not location:
+            print("❌ Invalid location. Try again.")
 
-        first_location = await Location.first()
-        world_name = first_location.region if first_location else "the world"
+    character = await Character.create(
+        name=name, race=race, location=location, description="An eager adventurer."
+    )
+    print(f"\n🎮 Playing as {name} the {race} in {location.name}")
 
-        prompt = f"""
-You are a Dungeon Master in the world of {world_name}.
-Player: "{user_input}"
+    # Main gameplay loop
+    llm = get_mistral()
+    llm = get_mistral()
+    retriever = await get_retriever()
 
-Relevant Lore:
-{context}
+    while True:
+        user_input = input("You: ").strip()
+        if not user_input:
+            continue
 
-Respond with a narrative followed by a JSON block like:
-{{
-  "new_event": {{...}},
-  "new_location": {{...}},
-  "new_character": {{...}}
-}}
-"""
+        relevant_docs = await retriever.ainvoke(user_input)
+        context = "\n\n".join(doc.page_content for doc in relevant_docs)
 
-        raw_output = llm.invoke(prompt)
-        print("DM:", raw_output)
+        world = await World.first()
+        prompt = PROMPT_TEMPLATE.format(
+            user_input=user_input,
+            context=context,
+            character_name=character.name,
+            character_race=character.race,
+            location=location.name,
+            world_name=world.name,
+            world_description=world.description,
+        )
 
-        try:
-            json_text = raw_output.split("{", 1)[1]
-            json_data = json.loads("{" + json_text)
+        response = llm.invoke(prompt)
 
-            if "new_event" in json_data:
-                await Event.create(**json_data["new_event"])
-            if "new_location" in json_data:
-                await Location.create(**json_data["new_location"])
-            if "new_character" in json_data:
-                await Character.create(**json_data["new_character"])
+        print("DM:", response.split("```")[0].strip())
 
-        except Exception as e:
-            print("⚠️ Could not parse LLM world update:", e)
 
 if __name__ == "__main__":
     asyncio.run(main())
