@@ -8,6 +8,7 @@ from utils.retrieval import get_retriever
 from utils.prompt_template import PROMPT_TEMPLATE
 from utils.select_character import select_character
 from utils.region import get_or_create_location
+from utils.player import select_or_create_player
 
 import nest_asyncio
 nest_asyncio.apply()
@@ -33,14 +34,16 @@ async def process_game_events(json_data, player):
 
     if "new_character" in json_data:
         char = json_data["new_character"]
-        location = await Location.get_or_none(name=char["location"])
+        # Ensure location exists
+        location, _ = await Location.get_or_create(name=char["location"])
+
         await Character.get_or_create(
             name=char["name"],
             defaults={
                 "race": char.get("race", "unknown"),
                 "description": char.get("description", "mysterious figure"),
                 "location": location,
-                "player": player,  # ✅ Include the player here
+                "player": player,
             }
         )
 
@@ -51,8 +54,7 @@ async def main():
     print("Welcome to your D&D world!")
 
     # Get or create player
-    player_name = input("Enter your player name: ").strip()
-    player, _ = await Player.get_or_create(name=player_name)
+    player = await select_or_create_player()
 
     # Select or create character
     character, location = await select_character(player)
