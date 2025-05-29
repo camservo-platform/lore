@@ -16,3 +16,4 @@ class Event(models.Model):
     title = fields.CharField(max_length=100)
     summary = fields.TextField()
     timestamp = fields.DatetimeField(auto_now_add=True)
+

@@ -1,0 +1,7 @@
+World: Aeloria
+Description: Aeloria, a realm teeming with diverse cultures and magical wonders, where the mortal world meets the mystic plane known as Arcadia. It is an ever-changing tapestry of towering mountains, dense forests, sprawling cities, and ancient ruins.
+The Iron Empire: A vast expanse of land ruled by a tyrannical emperor. It is known for its iron-clad military might, advanced technology, and relentless pursuit of power.
+The Verdant Alliance: An intricate network of independent kingdoms and city-states, united under a council. The verdant alliance is renowned for its magical prowess, deep connection to nature, and rich artistic heritage.
+The Shattered Isles: A collection of floating islands, home to nomadic tribes and roving pirates. The shattered isles are known for their unpredictable weather, mystical creatures, and hidden treasures.
+Magic/Threat: The Veil, an enigmatic force that keeps the mortal world separate from Arcadia. When the veil weakens, powerful magical entities known as the Aetherborn can cross over into Aeloria, causing chaos and destruction.
+Historical Event: The Sundering: a cataclysmic event that shattered the once-unified continent of Aeloria into its current archipelago, unleashing ancient powers and forever altering the world's landscape.
