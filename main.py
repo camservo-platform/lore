@@ -9,6 +9,7 @@ from utils.prompt_template import PROMPT_TEMPLATE
 from utils.select_character import select_character
 from utils.player import select_or_create_player
 from utils.events import process_game_events
+from utils.admin import handle_admin_command
 
 import nest_asyncio
 
@@ -63,11 +64,31 @@ async def main():
         if not user_input:
             continue
 
+        # if user_input.startswith("/"):
+        #     admin_command = user_input[1:].strip()
+
+        #     if admin_command.startswith("ask"):
+        #         question = admin_command[len("ask"):].strip()
+        #         prompt = f"You are the world engine. Answer this admin query directly:\n\n{question}"
+        #         print("🛠️ Admin:", llm.invoke(prompt))
+        #         continue
+
+        #     elif admin_command == "help":
+        #         print("Admin commands:\n  /ask <question>\n  /quit\n  /help")
+        #         continue
+
+        if user_input.startswith("/admin "):
+            admin_input = user_input[len("/admin ") :]
+            await handle_admin_command(admin_input, llm, vector_db)
+            continue
+            print("debug")
+
         if user_input.lower() in {"quit", "exit"}:
             print("👋 Exiting the game. Goodbye!")
             await Tortoise.close_connections()
             break
 
+        print("debugging******")
         relevant_docs = await retriever.ainvoke(user_input)
         context = "\n\n".join(doc.page_content for doc in relevant_docs)
 
