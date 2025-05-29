@@ -44,8 +44,16 @@ Respond with only a JSON object that matches this format.
 
     # Save regions and locations
     for region_data in data["regions"]:
-        region = await Region.create(name=region_data["name"], description=region_data["description"], world=world)
-        await Location.create(name=region_data["name"], description=region_data["description"], region=region)
+        region = await Region.create(
+            name=region_data["name"],
+            description=region_data["description"],
+            world=world,
+        )
+        await Location.create(
+            name=region_data["name"],
+            description=region_data["description"],
+            region=region,
+        )
 
     # Save major threat
     await Event.create(name="Major Threat", description=data["magic_or_threat"])
@@ -55,6 +63,7 @@ Respond with only a JSON object that matches this format.
 
     print("✅ World seeding complete!")
     await Tortoise.close_connections()
+
 
 if __name__ == "__main__":
     asyncio.run(seed_world())

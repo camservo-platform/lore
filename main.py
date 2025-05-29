@@ -11,17 +11,20 @@ from utils.region import get_or_create_location
 from utils.player import select_or_create_player
 
 import nest_asyncio
+
 nest_asyncio.apply()
+
 
 def extract_json(response: str):
     """Extract JSON-like content from the LLM response."""
     try:
         match = re.search(r"\{.*\}$", response.strip(), re.DOTALL)
         if match:
-            return json.loads(match.group()), response[:match.start()].strip()
+            return json.loads(match.group()), response[: match.start()].strip()
     except json.JSONDecodeError:
         pass
     return None, response.strip()
+
 
 async def process_game_events(json_data, player):
     if "new_location" in json_data:
@@ -44,8 +47,9 @@ async def process_game_events(json_data, player):
                 "description": char.get("description", "mysterious figure"),
                 "location": location,
                 "player": player,
-            }
+            },
         )
+
 
 async def main():
     await Tortoise.init(db_url="sqlite://world.db", modules={"models": ["db.models"]})
@@ -90,6 +94,7 @@ async def main():
 
         if json_data:
             await process_game_events(json_data, player)
+
 
 if __name__ == "__main__":
     asyncio.run(main())

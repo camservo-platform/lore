@@ -8,8 +8,7 @@ async def select_or_create_player():
     choices.append("Create a new player")
 
     selected = questionary.select(
-        "Choose a player or create a new one:",
-        choices=choices
+        "Choose a player or create a new one:", choices=choices
     ).ask()
 
     if selected == "Create a new player":

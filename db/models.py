@@ -7,10 +7,12 @@ class Player(models.Model):
 
     characters: fields.ReverseRelation["Character"]  # <-- Add this line
 
+
 class Region(models.Model):
     id = fields.IntField(pk=True)
     name = fields.CharField(max_length=255, unique=True)
     description = fields.TextField()
+
 
 class Character(models.Model):
     id = fields.IntField(pk=True)
