@@ -7,6 +7,12 @@ from datetime import datetime
 from db.models import Location, Character, Event  # Ensure this matches your project
 from langchain_core.vectorstores import VectorStoreRetriever
 
+async def add_doc(obj: Model, prefix: str):
+    embedding_model = OllamaEmbeddings(model="mistral")
+    chroma = Chroma(persist_directory=".chroma", embedding_function=embedding_model)
+
+    doc = doc_from_obj(obj, prefix)
+    chroma.add_documents([doc])
 
 def doc_from_obj(obj, prefix: str) -> Document:
     metadata = {}

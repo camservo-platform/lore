@@ -2,6 +2,7 @@
 
 import questionary
 from db.models import Character, Location
+from utils.retrieval import add_doc
 
 
 async def create_new_character(player):
@@ -25,5 +26,7 @@ async def create_new_character(player):
         description="An eager adventurer.",
         player=player,
     )
+
+    await add_doc(character, "Character: ")  # ✅ embed new character in vector DB
 
     return character, location
