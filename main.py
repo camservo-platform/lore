@@ -1,9 +1,14 @@
 import asyncio
 from tortoise import Tortoise
-from db.models import Player, Character, Location, Event, World
+from db.models import Player, World, Character
 from utils.llm import get_mistral
 from utils.retrieval import get_retriever
 from utils.prompt_template import PROMPT_TEMPLATE
+from utils.character_creation import create_new_character
+import questionary
+import nest_asyncio
+
+nest_asyncio.apply()
 
 
 async def main():
@@ -16,37 +21,32 @@ async def main():
     player_name = input("Enter your player name: ").strip()
     player, _ = await Player.get_or_create(name=player_name)
 
-    print("\nCreating a new character...")
-    name = input("Character name: ").strip()
+    # Show character options if they exist
+    characters = await Character.filter(player=player).all()
 
-    races = ["human", "elf", "orc", "dwarf", "halfling"]
-    print("\nChoose a race:")
-    for r in races:
-        print(f"- {r}")
-    while True:
-        race = input("Character race: ").strip().lower()
-        if race in races:
-            break
-        print("❌ Invalid race. Please choose from the list above.")
+    if characters:
+        choices = [
+            f"{char.name} the {char.race} ({(await char.location).name})"
+            for char in characters
+        ]
+        choices.append("➕ Create a new character")
 
-    locations = await Location.all()
-    print("\nAvailable starting locations:")
-    for loc in locations:
-        print(f"- {loc.name}")
-    location = None
-    while not location:
-        choice = input("Starting location: ").strip()
-        location = next((loc for loc in locations if loc.name == choice), None)
-        if not location:
-            print("❌ Invalid location. Try again.")
+        selection = questionary.select(
+            "Choose a character or create a new one:", choices=choices
+        ).ask()
 
-    character = await Character.create(
-        name=name, race=race, location=location, description="An eager adventurer."
-    )
-    print(f"\n🎮 Playing as {name} the {race} in {location.name}")
+        if selection == "➕ Create a new character":
+            character, location = await create_new_character(player)
+        else:
+            index = choices.index(selection)
+            character = characters[index]
+            location = await character.location
+    else:
+        character, location = await create_new_character(player)
+
+    print(f"\n🎮 Playing as {character.name} the {character.race} in {location.name}")
 
     # Main gameplay loop
-    llm = get_mistral()
     llm = get_mistral()
     retriever = await get_retriever()
 
@@ -70,7 +70,6 @@ async def main():
         )
 
         response = llm.invoke(prompt)
-
         print("DM:", response.split("```")[0].strip())
 
 

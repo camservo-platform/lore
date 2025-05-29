@@ -6,7 +6,7 @@ from db.models import Location, Event, World
 from utils.llm import get_mistral
 
 GEN_PROMPT = """
-You are a worldbuilder for a high fantasy RPG. Generate a setting that includes:
+You are a worldbuilder for a high fantasy RPG, but also there's aliens.  Also, wolfman. Generate a setting that includes:
 
 - The name and description of the world
 - Three major regions or factions

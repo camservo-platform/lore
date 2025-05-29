@@ -1,72 +1,80 @@
 # Lore
 
-**Lore** is a persistent, AI-powered storytelling engine for Dungeons & Dragons and other fantasy adventures. It combines a local vector database (Chroma), a local language model (via Ollama), and structured storage (Tortoise ORM) to create a continuously evolving world.
+**Lore** is a persistent, AI-powered storytelling engine for Dungeons & Dragons and fantasy adventures. It combines a local vector database (Chroma), a local language model (via Ollama), and structured storage (Tortoise ORM) to maintain a continuously evolving game world.
 
 ## Features
 
-- 🌍 Persistent world-building powered by AI
-- 🧙 Dynamic character creation and tracking
-- 📚 World lore and event memory using vector retrieval
-- ⚡ Uses local models (e.g., Mistral via Ollama)
-- 🐢 Asynchronous ORM via Tortoise
-- 🧠 Retrieval-Augmented Generation (RAG)
+- 🌍 Persistent world state with characters, events, and lore
+- 🧙 Dynamic character creation per player
+- 📚 Context-aware responses using vector retrieval (RAG)
+- 🐢 Asynchronous ORM with Tortoise
+- 🧠 Local LLM integration using Ollama (e.g., Mistral)
+- ⚙️ Extendable prompt template system
 
-## Setup
-
-### Requirements
+## Requirements
 
 - Python 3.10+
-- [Ollama](https://ollama.com/) with a model like `mistral`
-- ChromaDB
+- [Ollama](https://ollama.com/) (ensure a model like `mistral` is installed)
+- SQLite (default)
+- [Chroma](https://www.trychroma.com/) for vector store
 - `make` (optional)
 
-### Installation
+## Installation
 
 ```bash
-git clone https://github.com/camservo-platform/lore
+git clone https://github.com/yourusername/lore.git
 cd lore
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Seed the database
+## Seeding the World
+
+Generate an initial world and populate the database with starter data:
 
 ```bash
 python -m db.init_db
 ```
 
-This initializes the world and its regions, a magical threat, and a historical event using the LLM.
+This will use the local LLM to define a world, regions, magical threats, and historical events.
 
-### Run the game
+## Running the Game
+
+Launch the text-based RPG interface:
 
 ```bash
 python main.py
 ```
 
-Follow the prompts to create a new character and begin interacting with the world.
+Follow prompts to:
+
+1. Enter your player name
+2. Create a new character
+3. Choose a starting location
+4. Interact with the world via natural language
 
 ## Project Structure
 
 ```
 lore/
 ├── db/
-│   └── init_db.py
-├── models/
-│   └── models.py
+│   ├── init_db.py        # Seeds the world using the LLM
+│   └── models.py         # Tortoise ORM models
 ├── utils/
-│   ├── prompt_template.py
-│   └── retrieval.py
-├── main.py
+│   ├── llm.py            # LLM wrapper
+│   ├── prompt_template.py# Prompt string for generating DM responses
+│   └── retrieval.py      # Vectorstore setup using Chroma
+├── main.py               # Main game loop
 ├── requirements.txt
 └── README.md
 ```
 
 ## Notes
 
-- Uses `langchain_ollama.OllamaLLM` and `langchain_chroma.Chroma` for up-to-date vector retrieval and LLM calls.
-- Metadata from user interactions is stored in SQLite via Tortoise ORM.
-- Ensure your Ollama server is running before launching the app.
+- Ollama must be running (`ollama serve`) and a model like `mistral` must be installed.
+- Vector search is powered by Chroma + LangChain with updated `langchain_ollama` and `langchain_chroma` support.
+- This project uses an embedded SQLite database for simplicity. You can swap it out for PostgreSQL, etc.
 
 ## License
 

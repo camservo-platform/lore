@@ -8,3 +8,5 @@ python-dotenv
 langchain-community
 langchain-ollama
 langchain-chroma
+questionary
+nest_asyncio
