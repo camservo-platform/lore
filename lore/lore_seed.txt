@@ -1,0 +1,7 @@
+World: Aeloria: The Eternal Twilight
+Description: Aeloria, a world bathed in eternal twilight, is a realm where magic and mystery intertwine with the mundane. Its celestial bodies are locked in an endless dance, casting a perpetual gloam upon the land.
+The Verdant Spires: A vast forest of colossal, spire-like trees, teeming with ancient elven cities hidden among their roots. The verdant canopy provides shelter from the eternal twilight.
+The Iron Peaks: A harsh, mountainous region inhabited by dwarves and hardy human clans, where the forges of legend produce unparalleled weapons and armor.
+The Sunken Isles: An archipelago shrouded in mist and magic, home to mysterious creatures and powerful mages who seek to unlock the secrets of the twilight.
+Magic/Threat: The Veil, a fractured barrier between Aeloria and the realm of dreams, is constantly threatened by the malevolent entity known as Nightshade. If it breaks completely, nightmarish horrors will pour forth.
+Historical Event: The Sundering: The cataclysmic event that shattered the world into its current form and sealed the Veil.
