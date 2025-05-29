@@ -2,6 +2,7 @@ import asyncio
 from tortoise import Tortoise
 from db.models import World, Region, Location, Event
 from utils.llm import get_mistral
+from utils.vectorstore import build_vectorstore
 import json
 
 
@@ -61,8 +62,13 @@ Respond with only a JSON object that matches this format.
     # Save historical event
     await Event.create(name="Historical Event", description=data["historical_event"])
 
-    print("✅ World seeding complete!")
+    print("✅ SQL seeding complete!")
+
+    await build_vectorstore()
+    print("✅ VectorStore seeding complete!")
+
     await Tortoise.close_connections()
+    print("✅ World seeding complete!")
 
 
 if __name__ == "__main__":

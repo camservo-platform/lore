@@ -4,7 +4,7 @@ import re
 from tortoise import Tortoise
 from db.models import Player, World, Event, Location, Character
 from utils.llm import get_mistral
-from utils.retrieval import get_retriever
+from utils.retriever import get_retriever_and_db
 from utils.prompt_template import PROMPT_TEMPLATE
 from utils.select_character import select_character
 from utils.region import get_or_create_location
@@ -37,18 +37,14 @@ async def process_game_events(json_data, player):
 
     if "new_character" in json_data:
         char = json_data["new_character"]
-        # Ensure location exists
-        location, _ = await Location.get_or_create(name=char["location"])
-
-        is_npc = char.get("is_npc", False)
-
+        location = await Location.get_or_none(name=char["location"])
         await Character.get_or_create(
             name=char["name"],
             defaults={
                 "race": char.get("race", "unknown"),
                 "description": char.get("description", "mysterious figure"),
                 "location": location,
-                "player": None if is_npc else player,
+                "player": None,  # 🚨 Ensures this is treated as an NPC
             },
         )
 
@@ -68,7 +64,8 @@ async def main():
 
     # Main gameplay loop
     llm = get_mistral()
-    retriever = await get_retriever()
+    # retriever = await get_retriever()
+    retriever, vector_db = await get_retriever_and_db()
 
     # Generate initial description
     world = await World.first()

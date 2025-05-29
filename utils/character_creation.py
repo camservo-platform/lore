@@ -2,7 +2,7 @@
 
 import questionary
 from db.models import Character, Location
-from utils.retrieval import add_doc
+from utils.vectorstore import add_doc
 
 
 async def create_new_character(player):
