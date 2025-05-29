@@ -68,6 +68,21 @@ async def main():
     llm = get_mistral()
     retriever = await get_retriever()
 
+    # Generate initial description
+    world = await World.first()
+    initial_prompt = PROMPT_TEMPLATE.format(
+        user_input="Describe where I am and what I see.",
+        context="",
+        character_name=character.name,
+        character_race=character.race,
+        location=location.name,
+        world_name=world.name,
+        world_description=world.description,
+    )
+    initial_response = llm.invoke(initial_prompt)
+    _, initial_text = extract_json(initial_response)
+    print("DM:", initial_text)
+
     while True:
         user_input = input("You: ").strip()
         if not user_input:
@@ -102,4 +117,8 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n👋 Exiting the game. Goodbye!")
+        asyncio.run(Tortoise.close_connections())
