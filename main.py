@@ -1,15 +1,48 @@
 import asyncio
+import json
+import re
 from tortoise import Tortoise
-from db.models import Player, World, Character
+from db.models import Player, World, Event, Location, Character
 from utils.llm import get_mistral
 from utils.retrieval import get_retriever
 from utils.prompt_template import PROMPT_TEMPLATE
-from utils.character_creation import create_new_character
-import questionary
-import nest_asyncio
+from utils.select_character import select_character
+from utils.region import get_or_create_location
 
+import nest_asyncio
 nest_asyncio.apply()
 
+def extract_json(response: str):
+    """Extract JSON-like content from the LLM response."""
+    try:
+        match = re.search(r"\{.*\}$", response.strip(), re.DOTALL)
+        if match:
+            return json.loads(match.group()), response[:match.start()].strip()
+    except json.JSONDecodeError:
+        pass
+    return None, response.strip()
+
+async def process_game_events(json_data, player):
+    if "new_location" in json_data:
+        loc = json_data["new_location"]
+        await get_or_create_location(loc)
+
+    if "new_event" in json_data:
+        event = json_data["new_event"]
+        await Event.create(name=event["title"], description=event["summary"])
+
+    if "new_character" in json_data:
+        char = json_data["new_character"]
+        location = await Location.get_or_none(name=char["location"])
+        await Character.get_or_create(
+            name=char["name"],
+            defaults={
+                "race": char.get("race", "unknown"),
+                "description": char.get("description", "mysterious figure"),
+                "location": location,
+                "player": player,  # ✅ Include the player here
+            }
+        )
 
 async def main():
     await Tortoise.init(db_url="sqlite://world.db", modules={"models": ["db.models"]})
@@ -21,29 +54,8 @@ async def main():
     player_name = input("Enter your player name: ").strip()
     player, _ = await Player.get_or_create(name=player_name)
 
-    # Show character options if they exist
-    characters = await Character.filter(player=player).all()
-
-    if characters:
-        choices = [
-            f"{char.name} the {char.race} ({(await char.location).name})"
-            for char in characters
-        ]
-        choices.append("➕ Create a new character")
-
-        selection = questionary.select(
-            "Choose a character or create a new one:", choices=choices
-        ).ask()
-
-        if selection == "➕ Create a new character":
-            character, location = await create_new_character(player)
-        else:
-            index = choices.index(selection)
-            character = characters[index]
-            location = await character.location
-    else:
-        character, location = await create_new_character(player)
-
+    # Select or create character
+    character, location = await select_character(player)
     print(f"\n🎮 Playing as {character.name} the {character.race} in {location.name}")
 
     # Main gameplay loop
@@ -70,8 +82,12 @@ async def main():
         )
 
         response = llm.invoke(prompt)
-        print("DM:", response.split("```")[0].strip())
+        json_data, text_response = extract_json(response)
 
+        print("DM:", text_response)
+
+        if json_data:
+            await process_game_events(json_data, player)
 
 if __name__ == "__main__":
     asyncio.run(main())
