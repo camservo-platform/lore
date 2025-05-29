@@ -1,7 +1,7 @@
-World: Aeloria: The Eternal Twilight
-Description: Aeloria, a world bathed in eternal twilight, is a realm where magic and mystery intertwine with the mundane. Its celestial bodies are locked in an endless dance, casting a perpetual gloam upon the land.
-The Verdant Spires: A vast forest of colossal, spire-like trees, teeming with ancient elven cities hidden among their roots. The verdant canopy provides shelter from the eternal twilight.
-The Iron Peaks: A harsh, mountainous region inhabited by dwarves and hardy human clans, where the forges of legend produce unparalleled weapons and armor.
-The Sunken Isles: An archipelago shrouded in mist and magic, home to mysterious creatures and powerful mages who seek to unlock the secrets of the twilight.
-Magic/Threat: The Veil, a fractured barrier between Aeloria and the realm of dreams, is constantly threatened by the malevolent entity known as Nightshade. If it breaks completely, nightmarish horrors will pour forth.
-Historical Event: The Sundering: The cataclysmic event that shattered the world into its current form and sealed the Veil.
+World: Galactis Lupus
+Description: A vast, sprawling planet with diverse landscapes ranging from dense forests to arid deserts, towering mountain ranges to expansive oceanic trenches. The planet is orbited by a series of orbiting moon-sized crystals that pulsate with an ethereal energy, altering the planet's weather and gravity patterns. Known as the Lunar Sentinels, these crystals are the source of the world's unique magical element: Lunar Energy.
+Elysian Forest: A vast, lush forest that serves as home to various magical creatures, including the legendary Wolfmen. The forest is teeming with Lunar Energy, and it's said that those who dwell within are attuned to its power.
+The Iron Peaks: A harsh, snow-covered mountain range where hardy dwarves mine for rare minerals and gems. The harsh climate and treacherous terrain make it a dangerous place, but the riches found within make it worth the risk.
+The Sandsea: A vast desert filled with ancient ruins and buried treasure. Nomadic tribes of humans and other desert-dwelling creatures roam the sands, seeking fortune and survival.
+Magic/Threat: Lunar Energy: A powerful magical force that can be harnessed for various purposes, such as healing, enchanting items, or even bending reality itself. However, when misused or manipulated by those with ill intentions, Lunar Energy can result in catastrophic consequences known as 'Lunar Storms' - powerful energy surges that can devastate entire regions.
+Historical Event: The Great Split: A cataclysmic event that occurred thousands of years ago when a rogue Lunar Sentinel plummeted into the planet, causing massive earthquakes and tsunamis. The aftermath divided Galactis Lupus into its three main continents: Elysia, Zephyrion, and Gaea.

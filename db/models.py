@@ -2,20 +2,19 @@ from tortoise import fields, models
 
 
 class Player(models.Model):
-    name = fields.CharField(max_length=100, unique=True)
-    character_ids = fields.JSONField(default=list)  # list of character IDs
-    current_character = fields.CharField(
-        max_length=100, null=True
-    )  # store character name or ID
+    id = fields.IntField(pk=True)
+    name = fields.CharField(max_length=100)
+
+    characters: fields.ReverseRelation["Character"]  # <-- Add this line
 
 
 class Character(models.Model):
     id = fields.IntField(pk=True)
     name = fields.CharField(max_length=100)
     race = fields.CharField(max_length=50)
-    location = fields.CharField(max_length=100)
     description = fields.TextField()
-    inventory = fields.JSONField(default=list)
+    player = fields.ForeignKeyField("models.Player", related_name="characters")
+    location = fields.ForeignKeyField("models.Location", related_name="characters")
 
 
 class Location(models.Model):
