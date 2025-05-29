@@ -1,0 +1,9 @@
+# requirements.txt
+ollama
+langchain
+chromadb
+tortoise-orm
+aiosqlite
+python-dotenv
+langchain-community
+langchain-ollama

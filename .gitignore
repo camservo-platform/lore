@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+
+# Virtual environment
+.venv/
+env/
+venv/
+
+# IDEs and editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# SQLite database
+*.db
+*.db-wal
+*.db-shm
+
+# LangChain/Chroma vector store
+.chroma/
+
+# Mac system files
+.DS_Store
+
+# Environment variables
+.env
+
