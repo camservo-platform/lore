@@ -1,11 +1,13 @@
-from langchain_community.vectorstores import Chroma
+# utils/vectorstore.py
+# from langchain_community.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_ollama import OllamaEmbeddings
 from tortoise.models import Model
 from datetime import datetime
 
 from db.models import Location, Character, Event  # Ensure this matches your project
-from langchain_core.vectorstores import VectorStoreRetriever
+
 
 async def add_doc(obj: Model, prefix: str):
     embedding_model = OllamaEmbeddings(model="mistral")
@@ -13,21 +15,6 @@ async def add_doc(obj: Model, prefix: str):
 
     doc = doc_from_obj(obj, prefix)
     chroma.add_documents([doc])
-
-def doc_from_obj(obj, prefix: str) -> Document:
-    metadata = {}
-    for k, v in obj.__dict__.items():
-        if k.startswith("_"):
-            continue
-        if isinstance(v, datetime):
-            metadata[k] = v.isoformat()
-        elif isinstance(v, (str, int, float, bool)) or v is None:
-            metadata[k] = v
-        else:
-            metadata[k] = str(v)  # fallback, safe stringification
-    return Document(
-        page_content=f"{prefix}{obj.name}\n{obj.description}", metadata=metadata
-    )
 
 
 async def build_vectorstore() -> Chroma:
@@ -47,6 +34,17 @@ async def build_vectorstore() -> Chroma:
     return db
 
 
-async def get_retriever() -> VectorStoreRetriever:
-    db = await build_vectorstore()
-    return db.as_retriever()
+def doc_from_obj(obj, prefix: str) -> Document:
+    metadata = {}
+    for k, v in obj.__dict__.items():
+        if k.startswith("_"):
+            continue
+        if isinstance(v, datetime):
+            metadata[k] = v.isoformat()
+        elif isinstance(v, (str, int, float, bool)) or v is None:
+            metadata[k] = v
+        else:
+            metadata[k] = str(v)  # fallback, safe stringification
+    return Document(
+        page_content=f"{prefix}{obj.name}\n{obj.description}", metadata=metadata
+    )

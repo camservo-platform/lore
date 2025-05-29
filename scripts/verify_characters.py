@@ -2,7 +2,7 @@
 
 import asyncio
 from tortoise import Tortoise
-from utils.retrieval import build_vectorstore
+from utils.retriever import build_vectorstore
 from db.models import Character
 
 

@@ -4,6 +4,7 @@ from langchain_chroma import Chroma
 # Update if your actual persist directory is elsewhere
 PERSIST_DIR = ".chroma"
 
+
 def main():
     if not os.path.exists(PERSIST_DIR):
         print(f"❌ No vector store found at: {PERSIST_DIR}")
@@ -17,6 +18,7 @@ def main():
         print(f"\n=== Document {i + 1} ===")
         print("📜 Content:\n", doc)
         print("🧾 Metadata:\n", meta)
+
 
 if __name__ == "__main__":
     main()
