@@ -281,6 +281,9 @@ const TOOL_VERBS = {
   create_character: "creating a character", log_event: "writing in the chronicle",
   use_ability: "calling on an ability", recover: "letting the party recover", grant_ability: "granting an ability",
   list_character_options: "looking over races and classes", choose_race_and_class: "updating a character",
+  add_quest: "updating the quest log", update_quest: "updating the quest log", list_quests: "checking the quest log",
+  describe_item: "examining an item", record_npc: "noting a character", update_npc: "noting a character",
+  get_npc: "recalling a character", list_npcs: "recalling who's around", recall_story: "remembering earlier events",
 };
 
 function setActivity(text) {
@@ -382,6 +385,7 @@ async function refreshState() {
     renderParty(data.characters);
     renderDiceCharacters(data.characters);
     updateCreator(data.characters);
+    renderQuests(data.quests || []);
     const log = $("log");
     log.innerHTML = "";
     data.events.slice().reverse().forEach((ev) => log.append(eventItem(ev, false)));
@@ -424,13 +428,15 @@ function renderParty(characters) {
           ${c.conditions.length ? `<div class="conditions">${c.conditions.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}
           <div class="inventory-title">Inventory</div>
           <ul class="inventory">${c.inventory.length
-            ? c.inventory.map((i) => `<li title="${escapeHtml(i.description || "")}"><span>${escapeHtml(i.name)}</span>${
-                i.quantity > 1 ? `<span class="qty">×${i.quantity}</span>` : ""}</li>`).join("")
+            ? c.inventory.map((i, n) => `<li class="${i.origin ? "notable" : ""}"><button type="button" data-item="${n}"
+                title="${escapeHtml(i.description || "")}"><span>${escapeHtml(i.name)}</span>${
+                i.quantity > 1 ? `<span class="qty">×${i.quantity}</span>` : ""}</button></li>`).join("")
             : '<li class="meta">Empty</li>'}</ul>
         </div>
       </details>`;
     li.querySelector("details").addEventListener("toggle", (e) => state.sheets.set(c.name, e.target.open));
     li.querySelectorAll("[data-ability]").forEach((b) => b.addEventListener("click", () => showAbility(c, c.abilities[+b.dataset.ability])));
+    li.querySelectorAll("[data-item]").forEach((b) => b.addEventListener("click", () => showItem(c, c.inventory[+b.dataset.item])));
     party.append(li);
   }
 }
@@ -473,6 +479,78 @@ function showAbility(c, a) {
   $("ability-limits").textContent = limits;
   $("ability-dialog").showModal();
 }
+
+// ---------- items and quests ---------------------------------------------------------
+
+// One dialog for item and quest details; quests also take a player's own note.
+function showDetail(title, subtitle, html, quest = null) {
+  $("detail-title").textContent = title;
+  $("detail-subtitle").textContent = subtitle;
+  $("detail-body").innerHTML = html;
+  $("detail-note").hidden = !quest;
+  $("detail-note-text").value = "";
+  $("detail-form").dataset.quest = quest || "";
+  if (!$("detail-dialog").open) $("detail-dialog").showModal();
+}
+
+function showItem(c, item) {
+  const parts = [`<p>${escapeHtml(item.description || "No description recorded yet.")}</p>`];
+  if (item.origin) parts.push(`<p><strong>Where it came from:</strong> ${escapeHtml(item.origin)}</p>`);
+  showDetail(item.name, `Carried by ${c.name}${item.quantity > 1 ? ` · ${item.quantity} of them` : ""}`, parts.join(""));
+}
+
+const QUEST_STATUS = { active: "Active", completed: "Completed", failed: "Failed", abandoned: "Abandoned" };
+
+function questHtml(q) {
+  const facts = [q.giver && `<strong>Given by:</strong> ${escapeHtml(q.giver)}`, q.reward && `<strong>Reward:</strong> ${escapeHtml(q.reward)}`]
+    .filter(Boolean).join("<br>");
+  const notes = q.notes.length
+    ? `<ol class="quest-notes">${q.notes.map((n) => `<li>${escapeHtml(n.note)} <span class="by">· ${
+        n.by === "gm" ? "Game Master" : escapeHtml(n.by)}, ${ago(n.at)}</span></li>`).join("")}</ol>`
+    : '<p class="hint">No notes yet.</p>';
+  return `<p>${escapeHtml(q.summary)}</p>${facts ? `<p>${facts}</p>` : ""}<div class="inventory-title">Notes</div>${notes}`;
+}
+
+function showQuest(q) {
+  showDetail(q.title, QUEST_STATUS[q.status] || q.status, questHtml(q), q.title);
+}
+
+function renderQuests(quests) {
+  state.quests = quests;
+  const list = $("quests");
+  const item = (q) => `<li class="${q.status === "active" ? "" : "done"}"><button type="button" data-quest="${escapeHtml(q.title)}">
+    <span class="quest-title">${escapeHtml(q.title)}</span>
+    <span class="quest-meta">${q.status === "active" ? (q.giver ? `from ${escapeHtml(q.giver)}` : "active")
+      : QUEST_STATUS[q.status]}${q.notes.length ? ` · ${q.notes.length} note${q.notes.length > 1 ? "s" : ""}` : ""}</span></button></li>`;
+  const active = quests.filter((q) => q.status === "active");
+  const done = quests.filter((q) => q.status !== "active");
+  list.innerHTML = (active.length ? active.map(item).join("") : '<li class="meta">No quests yet.</li>') +
+    (done.length ? `<li><details><summary>Finished (${done.length})</summary><ul class="quests">${done.map(item).join("")}</ul></details></li>` : "");
+  list.querySelectorAll("[data-quest]").forEach((b) => b.addEventListener("click", () => {
+    const q = state.quests.find((x) => x.title === b.dataset.quest);
+    if (q) showQuest(q);
+  }));
+  // Keep an open quest dialog current as notes arrive.
+  const open = $("detail-dialog").open && $("detail-form").dataset.quest;
+  const current = open && quests.find((q) => q.title === open);
+  if (current) $("detail-body").innerHTML = questHtml(current);
+}
+
+async function addQuestNote() {
+  const title = $("detail-form").dataset.quest;
+  const note = $("detail-note-text").value.trim();
+  if (!title || !note) return;
+  try {
+    const q = await adminPost(`/api/campaigns/${state.campaign.id}/quests/note`, { campaign: state.campaign.name, title, note });
+    $("detail-note-text").value = "";
+    $("detail-body").innerHTML = questHtml(q);
+  } catch (e) { toast(e.message); }
+}
+
+$("detail-note-add").addEventListener("click", addQuestNote);
+$("detail-note-text").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { e.preventDefault(); addQuestNote(); }
+});
 
 // ---------- making a character -------------------------------------------------------
 

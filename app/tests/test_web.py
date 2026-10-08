@@ -166,3 +166,28 @@ def test_table_state_shows_identity_pool_and_uses_left():
                              {"name": "Stoneblood", "max_uses": 1, "uses_left": 0}]}]
     state = format_table_state(characters, sheets, [])
     assert "- Sela (player: alice, Dwarf Arcanist): 9/9 HP, Aether 3/4, uses left: Stoneblood 0/1" in state
+
+
+def test_speakers_and_story_text_from_a_reply():
+    from lore.web.app import plain_story, speakers
+    reply = ('The ferry rocks. <say who="Oskar" voice="masculine">Two coins.</say> '
+             '<say who="the guard">Move along.</say> <say who="Oskar">Or a ring.</say>')
+    assert speakers(reply) == [{"name": "Oskar", "voice": "masculine", "line": "Two coins."}]
+    assert plain_story(reply) == 'The ferry rocks. Oskar: "Two coins." the guard: "Move along." Oskar: "Or a ring."'
+
+
+def test_world_notes_list_quests_npcs_and_memories():
+    from lore.web.app import format_world_notes
+    quests = [{"title": "The Lost Lantern", "giver": "Mira Vell", "summary": "Find it.",
+               "notes": [{"note": "A heron took it."}]}]
+    npcs = [{"title": "Oskar", "disposition": "wary", "location": "the ferry", "appearances": 2},
+            {"title": "Mira Vell", "disposition": "friendly", "location": "the mill", "appearances": 1},
+            {"title": "Pell", "disposition": "unknown", "location": "", "appearances": 1, "stub": True}]
+    moments = [{"player": "alice", "said": "I promise a ring", "narration": "Oskar nods."}]
+    notes = format_world_notes(quests, npcs, "The Ferry", moments)
+    assert "- The Lost Lantern (from Mira Vell): Find it. Latest note: A heron took it." in notes
+    assert "NPCs known at The Ferry: Oskar (wary, at the ferry)" in notes
+    assert "could turn up again: Mira Vell (friendly, at the mill); Pell (unknown)" in notes
+    assert "stub record (describe them with record_npc when you can): Pell" in notes
+    assert "- alice: I promise a ring -> Oskar nods." in notes
+    assert format_world_notes([], [], "", []) == ""

@@ -87,6 +87,10 @@
         <ul class="party" id="party"></ul>
       </section>
       <section>
+        <h3>Quests</h3>
+        <ul class="quests" id="quests"></ul>
+      </section>
+      <section>
         <h3>Dice</h3>
         <form class="dice" id="dice-form">
           <div class="dice-quick">
@@ -205,6 +209,20 @@
       </section>
     </aside>
   </main>
+
+  <dialog id="detail-dialog">
+    <form method="dialog" id="detail-form">
+      <h3 id="detail-title"></h3>
+      <p class="hint" id="detail-subtitle"></p>
+      <div id="detail-body"></div>
+      <div id="detail-note" hidden>
+        <label for="detail-note-text" class="inventory-title">Add your own note</label>
+        <div class="row"><input id="detail-note-text" maxlength="500" placeholder="A theory, a reminder…" autocomplete="off">
+          <button type="button" class="small-button" id="detail-note-add">Add</button></div>
+      </div>
+      <div class="row end"><button value="close" class="primary">Close</button></div>
+    </form>
+  </dialog>
 
   <dialog id="ability-dialog">
     <form method="dialog">

@@ -61,6 +61,10 @@ TICKET_TTL = 60
 LINES_KEPT = 200
 LOCK_TTL = 600
 KICKOFF = "(I've just sat down at the table and I'm ready to play.)"
+# Story memory recalled into a turn: skip what's still in the conversation, and only
+# moments close enough in meaning to be worth the GM's attention.
+RECALL_SKIP_RECENT = 10
+RECALL_MIN_SIMILARITY = 0.55
 # Marks a turn the player set to "Ask the GM" (see gm.SYSTEM on out-of-character asides).
 OUT_OF_CHARACTER = "out of character, to the Game Master"
 
@@ -192,6 +196,62 @@ def describe_error(e: BaseException) -> str:
     if isinstance(e, anthropic.APIConnectionError):
         return "The Game Master couldn't reach the model (network error). Try again in a moment."
     return f"Something went wrong: {e}"
+
+
+SAY = re.compile(r"<say\b([^>]*)>(.*?)</say>", re.S)
+SAY_ATTR = re.compile(r'(\w+)\s*=\s*"([^"]*)"')
+# "the guard", "a sailor": unnamed, so not kept as a named NPC.
+UNNAMED = re.compile(r"^(the|a|an|some|one|another|someone|somebody)\b", re.I)
+
+
+def speakers(reply: str) -> list[dict[str, str]]:
+    """The named characters who speak in a reply (<say who=...>), each once, with their first line."""
+    found: dict[str, dict[str, str]] = {}
+    for attrs, line in SAY.findall(reply):
+        a = dict(SAY_ATTR.findall(attrs))
+        who = (a.get("who") or "").strip()
+        if not who or UNNAMED.match(who) or not who[0].isupper() or who.lower() in found:
+            continue
+        voice = a.get("voice", "").strip().lower()
+        found[who.lower()] = {"name": who, "voice": voice if voice in ("feminine", "masculine") else "",
+                              "line": " ".join(line.split())}
+    return list(found.values())
+
+
+def plain_story(reply: str) -> str:
+    """A reply as story text for memory: characters' lines attributed, tags gone."""
+    def line(m: re.Match) -> str:
+        who = dict(SAY_ATTR.findall(m.group(1))).get("who", "someone")
+        return f'{who}: "{" ".join(m.group(2).split())}"'
+    return SAY.sub(line, reply).strip()
+
+
+def format_world_notes(quests: list[dict[str, Any]], npcs: list[dict[str, Any]], here: str,
+                       moments: list[dict[str, Any]]) -> str:
+    """Quests, NPCs and remembered moments for the GM, after the table state."""
+    lines = []
+    if quests:
+        lines.append("Active quests:")
+        for q in quests:
+            latest = f" Latest note: {q['notes'][-1]['note']}" if q["notes"] else ""
+            lines.append(f"- {q['title']}" + (f" (from {q['giver']})" if q["giver"] else "") + f": {q['summary'][:200]}{latest}")
+    here_l = here.lower()
+    nearby = [n for n in npcs if here_l and here_l in (n.get("location") or "").lower()][:6]
+    elsewhere = [n for n in npcs if n not in nearby and n.get("appearances")][:5]
+    describe = lambda n: f"{n['title']} ({n['disposition']}{', at ' + n['location'] if n.get('location') else ''})"
+    if nearby:
+        lines.append(f"NPCs known at {here}: " + "; ".join(describe(n) for n in nearby))
+    if elsewhere:
+        lines.append("NPCs met elsewhere, who could turn up again: " + "; ".join(describe(n) for n in elsewhere))
+    stubs = [n["title"] for n in npcs if n.get("stub")]
+    if stubs:
+        lines.append("NPCs with only a stub record (describe them with record_npc when you can): " + ", ".join(stubs[:8]))
+    if moments:
+        lines.append("Earlier moments that may matter now (from story memory):")
+        for m in moments:
+            who = f"{m['player']}: {m['said']} -> " if m["said"] else ""
+            lines.append(f"- {who}{' '.join(m['narration'].split())[:400]}")
+    return ("[World notes]\n" + "\n".join(lines)) if lines else ""
 
 
 def format_table_state(characters: list[dict[str, Any]], sheets: list[dict[str, Any]],
@@ -496,9 +556,10 @@ def create_app(drain: Drain | None = None) -> Starlette:
         name = request.query_params["name"]
         async with toolbox.session(await user_of(request)) as tools:
             try:
-                characters, events = await asyncio.gather(
+                characters, events, quests = await asyncio.gather(
                     tools.call_json("list_characters", campaign=name),
                     tools.call_json("recent_events", campaign=name, limit=30),
+                    tools.call_json("list_quests", campaign=name),
                 )
                 # Full sheets (attributes, conditions, gold, inventory) for the sidebar.
                 sheets = await asyncio.gather(*(
@@ -506,7 +567,20 @@ def create_app(drain: Drain | None = None) -> Starlette:
                 ))
             except ToolCallError as e:
                 raise HTTPException(404, str(e)) from None
-        return JSONResponse({"characters": list(sheets), "events": events})
+        return JSONResponse({"characters": list(sheets), "events": events, "quests": quests})
+
+    async def quest_note(request: Request) -> Response:
+        """A player's own note on a quest (a theory, a reminder); recorded under their name."""
+        body = await request.json()
+        note = (body.get("note") or "").strip()
+        if not note or len(note) > 500:
+            return JSONResponse({"error": "Write a note (up to 500 characters)."}, status_code=400)
+        async with toolbox.session(await user_of(request)) as tools:
+            try:
+                return JSONResponse(await tools.call_json("update_quest", campaign=body["campaign"],
+                                                          title=body["title"], note=note, player_note=True))
+            except ToolCallError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
 
     async def character_options(request: Request) -> Response:
         """The races and classes to pick from at this table (core, as this world names them, plus its own)."""
@@ -573,7 +647,15 @@ def create_app(drain: Drain | None = None) -> Starlette:
             await asyncio.sleep(0.5)
         return True
 
-    async def table_state(campaign: str, user: str, new_conversation: bool) -> str | None:
+    async def optional(coro, default: Any, what: str) -> Any:
+        """Extra context that's nice to have: a failure (say, the embedding server) mustn't stop the turn."""
+        try:
+            return await coro
+        except Exception:
+            log.warning("couldn't load %s for the table state", what, exc_info=True)
+            return default
+
+    async def table_state(campaign: str, user: str, new_conversation: bool, said: str = "") -> str | None:
         try:
             async with toolbox.session(user) as tools:
                 characters, events, recaps = await asyncio.gather(
@@ -583,10 +665,23 @@ def create_app(drain: Drain | None = None) -> Starlette:
                     tools.call_json("recent_events", campaign=campaign, limit=1, type="session_ended")
                     if new_conversation else asyncio.sleep(0, []),
                 )
-                sheets = await asyncio.gather(*(
-                    tools.call_json("get_character", campaign=campaign, character=c["name"]) for c in characters
-                ))
+                here = next((c["location"] for c in sorted(characters, key=lambda c: c["player"] != user)
+                             if c["player"] and c["location"]), "")
+                sheets, quests, npcs, moments = await asyncio.gather(
+                    asyncio.gather(*(tools.call_json("get_character", campaign=campaign, character=c["name"])
+                                     for c in characters)),
+                    optional(tools.call_json("list_quests", campaign=campaign, status="active"), [], "quests"),
+                    optional(tools.call_json("list_npcs", campaign=campaign), [], "NPCs"),
+                    # What the players did before that bears on this: their choices keep consequences.
+                    optional(tools.call_json("recall_story", campaign=campaign, query=said, limit=3,
+                                             skip_recent=0 if new_conversation else RECALL_SKIP_RECENT,
+                                             min_similarity=RECALL_MIN_SIMILARITY), [], "story memory")
+                    if said else asyncio.sleep(0, []),
+                )
             state = format_table_state(characters, list(sheets), events)
+            notes = format_world_notes(quests, npcs, here, moments)
+            if notes:
+                state += "\n" + notes
             if recaps:
                 state += f"\n[Previously: {recaps[0]['summary']}]"
             return state
@@ -622,7 +717,7 @@ def create_app(drain: Drain | None = None) -> Starlette:
             system, version = saved["system"] or system_prompt(campaign), saved["version"] or "unversioned"
         else:
             system, version = system_prompt(campaign), current
-        state = await table_state(campaign, user, new_conversation=not messages)
+        state = await table_state(campaign, user, new_conversation=not messages, said=said)
         messages.append({"role": "user", "content": f"{user}: {text}" + (f"\n\n{state}" if state else "")})
         # Operator notes go in one appended system message: never edit what was sent.
         notes = []
@@ -671,6 +766,24 @@ def create_app(drain: Drain | None = None) -> Starlette:
                                  "aside": "1" if aside else ""},
                     maxlen=200, approximate=True,
                 )
+                if not aside:  # out-of-character answers aren't part of the story
+                    in_background(remember_turn(campaign, user, said, reply))
+
+    async def remember_turn(campaign: str, user: str, said: str, reply: str) -> None:
+        """After a turn: keep it in story memory and note every named NPC who spoke (a stub for new
+        ones), so the world remembers what happened and who was there. Best effort."""
+        with drain.hold():
+            try:
+                async with toolbox.session(user) as tools:
+                    characters = await tools.call_json("list_characters", campaign=campaign)
+                    here = next((c["location"] for c in characters if c["player"] == user and c["location"]), "")
+                    await tools.call_json("record_story", campaign=campaign, narration=plain_story(reply),
+                                          said=said, player=user)
+                    for s in speakers(reply):
+                        await tools.call_json("npc_appeared", campaign=campaign, name=s["name"], location=here,
+                                              voice=s["voice"], line=s["line"][:200])
+            except Exception:
+                log.exception("couldn't remember a turn at %s", campaign)
 
     def in_background(coro) -> asyncio.Task:
         task = asyncio.create_task(coro)
@@ -1129,6 +1242,7 @@ def create_app(drain: Drain | None = None) -> Starlette:
             Route("/api/worlds", forge_world, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/state", campaign_state),
             Route("/api/campaigns/{campaign_id:int}/options", character_options),
+            Route("/api/campaigns/{campaign_id:int}/quests/note", quest_note, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/characters", create_character, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/turn", take_turn, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/reset", reset_table, methods=["POST"]),

@@ -243,6 +243,10 @@ async def forge(
             for i, entry in enumerate(entries, 1):
                 await tools.call_json("add_lore", campaign=world["name"], **entry)
                 yield {"type": "lore", "kind": entry["kind"], "title": entry["title"], "done": i, "total": len(entries)}
+            # The starter quest opens the party's quest log, with its first step as the first lead.
+            await tools.call_json("add_quest", campaign=world["name"], title=quest["title"], summary=quest["goal"],
+                                  giver=quest["giver"], reward=quest["reward"],
+                                  note=f"First step: {quest['first_step']}")
             yield {"type": "status", "text": "Naming its peoples and callings…"}
             async for event in add_options(tools, world):
                 yield event

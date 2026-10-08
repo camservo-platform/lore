@@ -202,6 +202,27 @@ form#forge label { display: grid; gap: 4px; font-weight: 500; }
 .ability-effect, .ability-limits { margin: 8px 0; }
 .ability-limits { color: var(--muted); font-size: 14px; }
 
+/* inventory items and quests: click for details */
+.inventory button, .quests button {
+  width: 100%; display: flex; justify-content: space-between; gap: 8px; text-align: left;
+  background: none; border: 0; padding: 0; cursor: pointer; color: inherit; font: inherit;
+}
+.inventory button:hover span:first-child, .quests button:hover .quest-title { color: var(--accent); text-decoration: underline; }
+.inventory .notable span:first-child::after { content: " ✦"; color: var(--accent); font-size: 11px; }
+.quests { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.quests li { border-bottom: 1px dashed var(--line); padding-bottom: 4px; }
+.quests li:last-child { border-bottom: 0; }
+.quests button { display: grid; gap: 1px; }
+.quest-title { font-weight: 600; }
+.quest-meta { font-size: 12px; color: var(--muted); }
+.quests .done .quest-title { color: var(--muted); text-decoration: line-through; }
+.quests details summary { font-size: 12px; color: var(--muted); cursor: pointer; }
+.quest-notes { margin: 6px 0 0; padding-left: 18px; display: grid; gap: 4px; }
+.quest-notes .by { color: var(--muted); font-size: 12px; }
+#detail-body p { margin: 0 0 8px; }
+#detail-note { margin: 10px 0; display: grid; gap: 4px; }
+#detail-note input { flex: 1; }
+
 /* character creation card in the transcript */
 .creator { border: 1px solid var(--accent); border-radius: 12px; padding: 14px 16px; background: var(--surface); display: grid; gap: 10px; max-width: 46rem; }
 .creator h3 { margin: 0; }

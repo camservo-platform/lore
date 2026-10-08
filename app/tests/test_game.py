@@ -64,7 +64,7 @@ async def test_inventory_stacks_and_refuses_overdraw(game_tools, campaign):
     await make_fighter(game_tools, campaign)
     await game_tools("add_item", campaign=campaign, character="Brakka", item="Torch", quantity=2)
     c = await game_tools("add_item", campaign=campaign, character="Brakka", item="torch", quantity=3)
-    assert c["inventory"] == [{"name": "Torch", "quantity": 5, "description": ""}]
+    assert c["inventory"] == [{"name": "Torch", "quantity": 5, "description": "", "origin": ""}]
 
     with pytest.raises(ToolFailed, match="can't remove 6"):
         await game_tools("remove_item", campaign=campaign, character="Brakka", item="Torch", quantity=6)
@@ -282,3 +282,44 @@ async def test_existing_characters_choose_once_and_story_grants_abilities(game_t
                            summary="An old lantern's light.", effect="Reveals invisible things.",
                            source="relic", uses=1)
     assert ability(old, "Lantern of Ages")["uses_left"] == 1
+
+
+# --- quests and item origins ----------------------------------------------------------
+
+async def test_quest_log_with_notes_and_status(game_tools, campaign):
+    q = await game_tools("add_quest", campaign=campaign, title="The Lost Lantern", summary="Find Mira's lantern.",
+                         giver="Mira Vell", reward="20 gold", note="First step: ask at the mill.")
+    assert (q["status"], q["giver"], [n["note"] for n in q["notes"]]) == ("active", "Mira Vell", ["First step: ask at the mill."])
+    with pytest.raises(ToolFailed, match="already a quest"):
+        await game_tools("add_quest", campaign=campaign, title="the lost lantern", summary="x")
+    await game_tools("add_quest", campaign=campaign, title="Rats", summary="Clear the cellar.")
+    q = await game_tools("update_quest", campaign=campaign, title="the lost lantern", note="The miller saw a heron take it.")
+    # GM tool calls run under a player's name, so notes are the GM's unless marked as the player's
+    # own (in-process calls have no player, so both read "gm" here; the web table sends the name).
+    q = await game_tools("update_quest", campaign=campaign, title="the lost lantern", note="Check the reeds?",
+                         player_note=True)
+    assert [n["by"] for n in q["notes"]] == ["gm", "gm", "gm"]
+    q = await game_tools("update_quest", campaign=campaign, title="The Lost Lantern", status="completed",
+                         note="Returned the lantern.")
+    assert q["status"] == "completed" and q["finished_at"]
+    log = await game_tools("list_quests", campaign=campaign)
+    assert [x["title"] for x in log] == ["Rats", "The Lost Lantern"]  # active first
+    with pytest.raises(ToolFailed, match="Quests: The Lost Lantern, Rats"):
+        await game_tools("update_quest", campaign=campaign, title="Dragons", note="x")
+    events = await game_tools("recent_events", campaign=campaign, type="quest_updated")
+    assert events[-1]["summary"] == "Quest completed: The Lost Lantern"
+
+
+async def test_items_keep_description_and_origin(game_tools, campaign):
+    await make_fighter(game_tools, campaign)
+    c = await game_tools("add_item", campaign=campaign, character="Brakka", item="Heron Feather",
+                         description="A silver-veined feather.", origin="Taken from the heron's nest at the mill.")
+    c = await game_tools("add_item", campaign=campaign, character="Brakka", item="heron feather")  # stacks, keeps text
+    item = c["inventory"][0]
+    assert (item["quantity"], item["description"], item["origin"]) == (
+        2, "A silver-veined feather.", "Taken from the heron's nest at the mill.")
+    c = await game_tools("describe_item", campaign=campaign, character="Brakka", item="Heron Feather",
+                         description="It hums near water.")
+    assert c["inventory"][0]["description"] == "It hums near water."
+    with pytest.raises(ToolFailed, match="has no Rope"):
+        await game_tools("describe_item", campaign=campaign, character="Brakka", item="Rope", origin="x")

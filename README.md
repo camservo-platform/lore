@@ -171,13 +171,20 @@ transaction and then publishes it to Redis.
 | `use_ability`, `recover`, `grant_ability` | abilities: spend a use or pool points (refused when spent), restore after a proper rest, grant from the story |
 | `apply_damage`, `heal`, `grant_temp_hp`, `set_status` | HP with temporary HP; unconscious at 0, or dead if the overflow reaches max HP |
 | `add_condition`, `remove_condition` | conditions |
-| `add_item`, `remove_item`, `adjust_gold` | inventory (stacking, no overdraw) and gold |
+| `add_item`, `remove_item`, `describe_item`, `adjust_gold` | inventory (stacking, no overdraw; a description, and an origin for anything that isn't ordinary gear) and gold |
+| `add_quest`, `update_quest`, `list_quests` | the party's quest log: summary, giver, reward, status and notes |
 | `move_character` | location |
 | `roll_dice` | dice notation like `d20`, `2d6+1d4-1`; logged when given a campaign |
 | `log_event`, `recent_events` | story beats and the log itself |
 
 **lore**: `add_lore` (upsert by kind + title), `search_lore` (semantic, filter by
 kind/tags), `get_lore`, `list_lore`, `delete_lore`. Writes are also logged as events.
+NPCs are lore entries of kind `npc` with living details (where last seen, alive / dead /
+missing, how they feel about the party, appearances) and a history of notes:
+`record_npc`, `update_npc`, `get_npc`, `list_npcs`, and `npc_appeared`, which the web
+table calls for every named character who speaks (a stub entry for new ones). Story
+memory: `record_story` (the web table records every turn) and `recall_story` (by
+meaning, across all players and sessions of a world).
 
 Names (campaigns, characters, items, lore titles) match case-insensitively, since
 they come from speech.
@@ -229,6 +236,20 @@ Open `https://<host>/` and sign in.
 - **Dice**: the sidebar's dice tray rolls for you (quick dice or notation like `2d6+3`,
   for one of your characters); every roll at the table, the GM's included, appears in the
   story as a card and goes in the chronicle under the roller's name.
+- **Quest log**: the sidebar lists the party's quests, active first (finished ones
+  folded away). Click one for its summary, who gave it, the reward and its notes: the
+  GM's clues and progress, and players' own notes (add one from the same dialog). A new
+  world's starter quest starts the log.
+- **Items**: click any item in a sheet for its description; anything that isn't
+  ordinary gear (marked ✦) also says where it came from.
+- **NPCs**: every named character the GM voices gets a record in that world: the web
+  table notes each appearance after a turn and makes a stub for anyone new, which the
+  GM is asked to fill in. NPCs keep a history (deals, debts, betrayals), and each turn
+  the GM sees who's known at the party's location and who could turn up again.
+- **Story memory**: every turn (what the player did, and what happened) is embedded
+  into the world's story memory. Each turn, the moments most related to what the player
+  just said are recalled for the GM, from any player or session, so decisions carry
+  consequences for the whole table later on.
 - **Character sheets**: the Party panel shows each character's stats, abilities (with
   uses or pool left; click one for what it does and how often), conditions and
   inventory, yours first and expanded.
