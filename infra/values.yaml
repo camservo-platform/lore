@@ -129,6 +129,8 @@ mcp:
       module: lore.mcp.lore
       path: /mcp/lore
       replicas: 1
+  # Time for Traefik and the web pods to stop sending requests to an old pod on deploy.
+  preStopSeconds: 5
   nodeSelector: {}
   tolerations: []
   resources:
@@ -151,6 +153,16 @@ web:
   # https://<ingress.host>/auth/github/callback. Passwords (./deploy.sh add-user) keep
   # working alongside it. Set in values.local.yaml.
   githubUsers: {}
+  # Deploys don't cut players off: the old pod drains while the new one takes new
+  # connections. Live feeds and idle voice sessions reconnect to the new pod at once (and
+  # resume without missing anything); GM turns and world forging in progress finish
+  # first. Whatever is still running after `seconds` is cancelled cleanly (history saved,
+  # table unlocked). `./deploy.sh deploy --now` (or `./deploy.sh hurry` while a drain is
+  # running) skips the wait. The pod's termination grace is preStopSeconds + seconds + 20.
+  drain:
+    # Time for Traefik to stop routing new requests to the old pod before it drains.
+    preStopSeconds: 5
+    seconds: 240
   nodeSelector: {}
   tolerations: []
   resources:

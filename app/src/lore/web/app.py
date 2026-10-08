@@ -12,6 +12,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import uuid
 from html import escape
 from urllib.parse import quote
@@ -46,6 +47,7 @@ from lore.usage import Health, Presence, Usage
 from lore.voice import Voice
 from lore.web import conversation
 from lore.web.auth import COOKIE, Auth, AuthError, parse_user_map
+from lore.web.drain import Drain, Draining
 
 log = logging.getLogger(__name__)
 
@@ -218,11 +220,17 @@ def format_table_state(characters: list[dict[str, Any]], sheets: list[dict[str, 
     return "\n".join(lines)
 
 
-def sse(events: AsyncIterator[dict[str, Any]]) -> StreamingResponse:
+def sse(events: AsyncIterator[Any], retry_ms: int | None = None) -> StreamingResponse:
+    """Server-Sent Events from `events`: dicts, (id, dict) pairs for resumable streams, or
+    None for a keepalive. `retry_ms` tells the browser how soon to reconnect."""
     async def body():
+        if retry_ms is not None:
+            yield f"retry: {retry_ms}\n\n"
         async for event in events:
             if event is None:
                 yield ": keepalive\n\n"
+            elif isinstance(event, tuple):
+                yield f"id: {event[0]}\ndata: {json.dumps(event[1])}\n\n"
             else:
                 yield f"data: {json.dumps(event)}\n\n"
 
@@ -231,10 +239,34 @@ def sse(events: AsyncIterator[dict[str, Any]]) -> StreamingResponse:
     )
 
 
-def create_app() -> Starlette:
+# A feed's SSE id is "<events id>,<chat id>": where the browser got to in both streams, so
+# a reconnect (e.g. to the new pod after a deploy) resumes without missing anything.
+STREAM_ID = re.compile(r"\d+-\d+")
+
+
+def parse_feed_id(raw: str | None) -> tuple[str, str] | None:
+    parts = (raw or "").split(",")
+    if len(parts) != 2 or not all(STREAM_ID.fullmatch(p) for p in parts):
+        return None
+    return parts[0], parts[1]
+
+
+def stream_id_le(a: str, b: str) -> bool:
+    return tuple(map(int, a.split("-"))) <= tuple(map(int, b.split("-")))
+
+
+# Shown when a deploy cancels a turn that ran past the drain deadline (or was hurried).
+TURN_CUT_SHORT = ("The server restarted before the Game Master finished. Anything already recorded "
+                  "stands; say that again to carry on.")
+DRAIN_RETRY_MS = 1000
+
+
+def create_app(drain: Drain | None = None) -> Starlette:
     # Here rather than in __main__: with reload, the app runs in a child process.
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     settings = WebSettings.from_env()
+    # Without one (tests, live reload) nothing ever drains.
+    drain = drain or Drain()
     redis = Redis(
         host=settings.redis_host, port=settings.redis_port, password=settings.redis_password, decode_responses=True
     )
@@ -392,16 +424,21 @@ def create_app() -> Starlette:
     async def forge_world(request: Request) -> Response:
         user = await user_of(request)
         body = await request.json()
-        async def counted(events):
-            async for event in events:
-                if event["type"] in ("done", "error"):
-                    metrics.WORLDS.labels("ok" if event["type"] == "done" else "failed").inc()
-                yield event
+        if drain.draining.is_set():
+            raise HTTPException(503, "Lore is restarting; try again in a moment.")
 
-        return sse(counted(worldgen.forge(
-            llm, settings.llm_model, toolbox, user, body.get("theme", ""), (body.get("name") or "").strip() or None,
-            on_usage=on_usage, on_error=on_model_error,
-        )))
+        async def forging() -> AsyncIterator[dict[str, Any]]:
+            # Held so a deploy lets the world finish forging.
+            with drain.hold():
+                async for event in worldgen.forge(
+                    llm, settings.llm_model, toolbox, user, body.get("theme", ""),
+                    (body.get("name") or "").strip() or None, on_usage=on_usage, on_error=on_model_error,
+                ):
+                    if event["type"] in ("done", "error"):
+                        metrics.WORLDS.labels("ok" if event["type"] == "done" else "failed").inc()
+                    yield event
+
+        return sse(forging())
 
     async def acquire_turn(table: Table, turn_id: str, wait: float = 0) -> bool:
         """Takes the table's turn lock, waiting up to `wait` seconds for another player's turn."""
@@ -439,7 +476,14 @@ def create_app() -> Starlette:
     ) -> None:
         """Runs one GM turn under an already-acquired lock, streaming events to `emit`.
         `said` is what the player said (shown in their lines); `note` is extra context
-        for the GM only, such as that they interrupted."""
+        for the GM only, such as that they interrupted. A deploy waits for it to finish."""
+        with drain.hold():
+            await _play_turn(table, turn_id, campaign, user, said, mode, emit, note)
+
+    async def _play_turn(
+        table: Table, turn_id: str, campaign: str, user: str, said: str, mode: str,
+        emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None,
+    ) -> None:
         text = said or KICKOFF
         if note:
             text = f"({note}) {text}"
@@ -479,6 +523,11 @@ def create_app() -> Starlette:
             log.exception("turn failed")
             await on_model_error(e)
             await emit({"type": "error", "text": describe_error(e)})
+        except asyncio.CancelledError:
+            # Cancelled by a drain that ran out of time: still save and unlock (below).
+            log.warning("turn cancelled at %s", campaign)
+            await emit({"type": "error", "text": TURN_CUT_SHORT})
+            raise
         finally:
             metrics.TURN_SECONDS.labels(mode).observe(asyncio.get_running_loop().time() - started)
             await table.save(_complete_history(messages), mode, system, version)
@@ -503,6 +552,9 @@ def create_app() -> Starlette:
         body = await request.json()
         mode = "speech" if body.get("mode") == "speech" else "text"
         turn_id = uuid.uuid4().hex
+        if drain.draining.is_set():
+            # Rare: the ingress stops sending requests here before the drain starts.
+            raise HTTPException(503, "Lore is restarting; try again in a moment.")
         if not await acquire_turn(table, turn_id):
             raise HTTPException(409, "The Game Master is answering another player; try again in a moment.")
 
@@ -547,6 +599,9 @@ def create_app() -> Starlette:
         return JSONResponse({"ticket": ticket})
 
     async def voice_socket(ws: WebSocket) -> None:
+        if drain.draining.is_set():
+            await ws.close(code=1012)  # "service restart": the browser reconnects to the new pod
+            return
         raw = await redis.getdel(f"lore:voice:ticket:{ws.query_params.get('ticket', '')}")
         if not raw or voice is None:
             await ws.close(code=4401)
@@ -574,11 +629,19 @@ def create_app() -> Starlette:
         await presence.voice(user, True)
         metrics.VOICE_SESSIONS.inc()
         try:
-            await conversation.serve(ws, settings.deepgram_api_key, settings.stt_model, play)
+            # Held so a deploy waits for this player to finish speaking and hear the reply;
+            # then the session asks the browser to reconnect (to the new pod).
+            with drain.hold():
+                await conversation.serve(ws, settings.deepgram_api_key, settings.stt_model, play, drain.draining)
         finally:
             await presence.voice(user, False)
             metrics.VOICE_SESSIONS.dec()
             await usage.voice(asyncio.get_running_loop().time() - started)
+        if drain.draining.is_set():
+            try:
+                await ws.close(code=1012)
+            except RuntimeError:
+                pass  # already closed
         log.info("voice session ended: %s at %s", user, campaign)
 
     async def player_roll(request: Request) -> Response:
@@ -617,23 +680,45 @@ def create_app() -> Starlette:
         campaign_id = int(request.path_params["campaign_id"])
         table = Table(redis, campaign_id)
 
-        async def events() -> AsyncIterator[dict[str, Any] | None]:
-            last = {table.events: "$", table.chat: "$"}
+        keys = (table.events, table.chat)
+        resume = parse_feed_id(request.headers.get("last-event-id") or request.query_params.get("last"))
+
+        async def tip(key: str) -> str:
+            newest = await redis.xrevrange(key, count=1)
+            return newest[0][0] if newest else "0-0"
+
+        async def events() -> AsyncIterator[Any]:
+            # While draining, end at once: the browser reconnects to the new pod and resumes.
+            if drain.draining.is_set():
+                return
+            tips = dict(zip(keys, await asyncio.gather(*(tip(k) for k in keys))))
+            last = dict(zip(keys, resume)) if resume else dict(tips)
+
+            def feed_id() -> str:
+                return ",".join(last[k] for k in keys)
+
+            # Gives the browser a resume point straight away, before anything happens.
+            yield feed_id(), {"type": "hello", "resumed": resume is not None}
             while not await request.is_disconnected():
                 await presence.seen(user, "table", campaign_id)
-                batches = await redis.xread(last, block=15000)
+                try:
+                    batches = await drain.interruptible(redis.xread(last, count=200, block=15000))
+                except Draining:
+                    return
                 if not batches:
                     yield None  # keepalive through proxies
                     continue
                 for key, entries in batches:
                     for entry_id, fields in entries:
                         last[key] = entry_id
+                        # Missed while reconnecting: shown, but not read aloud again.
+                        replay = stream_id_le(entry_id, tips[key])
                         if key == table.events:
-                            yield {"type": "event", "event": json.loads(fields["event"])}
+                            yield feed_id(), {"type": "event", "event": json.loads(fields["event"]), "replay": replay}
                         else:
-                            yield {"type": "chat", **fields}
+                            yield feed_id(), {"type": "chat", **fields, "replay": replay}
 
-        return sse(events())
+        return sse(events(), retry_ms=DRAIN_RETRY_MS)
 
     def npc_voices_key(campaign_id: int) -> str:
         return f"lore:campaign:{campaign_id}:npc-voices"

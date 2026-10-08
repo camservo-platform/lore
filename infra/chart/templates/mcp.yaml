@@ -24,6 +24,12 @@ metadata:
     {{- include "lore.labels" $ctx | nindent 4 }}
 spec:
   replicas: {{ $server.replicas }}
+  # Start the new pod and wait for it to be ready before retiring an old one.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       {{- include "lore.selectorLabels" $ctx | nindent 6 }}
@@ -57,6 +63,12 @@ spec:
         - name: mcp
           image: {{ include "lore.image" $root }}
           command: ["python", "-m", {{ $server.module | quote }}]
+          lifecycle:
+            preStop:
+              # Lets Traefik and the web pods stop sending requests here first; requests
+              # are short, so uvicorn's own graceful shutdown covers the rest.
+              exec:
+                command: ["sleep", "{{ $root.Values.mcp.preStopSeconds }}"]
           envFrom:
             - configMapRef:
                 name: {{ include "lore.fullname" $root }}-config

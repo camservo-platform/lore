@@ -1,7 +1,11 @@
 #!/usr/bin/env bash
 # Repeatable deploy/ops wrapper for Lore on Kubernetes.
 #
-#   ./deploy.sh [deploy]          install or upgrade (idempotent)
+#   ./deploy.sh [deploy]          install or upgrade (idempotent); old web pods drain (players
+#                                 reconnect, GM turns in progress finish) for up to web.drain.seconds
+#   ./deploy.sh deploy --now      same, but cut the drain short: running turns are cancelled
+#                                 cleanly (history saved, tables unlocked) as soon as the new pods are up
+#   ./deploy.sh hurry             cut short the drain of web pods still stopping after a deploy
 #   ./deploy.sh diff              render manifests and diff against the cluster
 #   ./deploy.sh status            show workloads, PVCs, keys and users
 #   ./deploy.sh set-key <name>    store a hosted-service key (deepgram|llm), read from stdin
@@ -120,7 +124,12 @@ ensure_api_keys() {
 }
 
 cmd_deploy() {
-  local tag
+  local tag now=false
+  case "${1:-}" in
+    --now) now=true ;;
+    "") ;;
+    *) echo "usage: $0 deploy [--now]" >&2; exit 1 ;;
+  esac
   tag="$(app_tag)"
   log "Context: $KUBE_CONTEXT  Namespace: $NAMESPACE  Release: $RELEASE  App: ${tag:0:12}"
   # shellcheck disable=SC2046
@@ -140,7 +149,37 @@ cmd_deploy() {
   fi
   kc get deployment -l "app.kubernetes.io/instance=$RELEASE" -o name \
     | xargs -n1 -I{} kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" rollout status {} --timeout=5m
+  if $now; then
+    cmd_hurry
+  elif [[ -n "$(draining_web_pods)" ]]; then
+    log "Old web pods are finishing GM turns in progress before they stop ('./deploy.sh hurry' to cut that short)"
+  fi
   cmd_status
+}
+
+# Web pods shutting down (marked for deletion) and still draining.
+draining_web_pods() {
+  kc get pods -l "app.kubernetes.io/name=web,app.kubernetes.io/instance=$RELEASE" \
+    -o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{"\n"}{end}'
+}
+
+# SIGUSR1 tells a draining web pod to stop waiting: turns still running are cancelled,
+# which saves their history and unlocks their tables, and the pod exits.
+cmd_hurry() {
+  local pods pod
+  pods="$(draining_web_pods)"
+  if [[ -z "$pods" ]]; then
+    log "No web pods are draining"
+    return
+  fi
+  for pod in $pods; do
+    log "Ending the drain of $pod"
+    kc exec "$pod" -c web -- python -c 'import os, signal; os.kill(1, signal.SIGUSR1)' \
+      || warn "Couldn't signal $pod (already stopped?)"
+  done
+  # shellcheck disable=SC2086
+  kc wait --for=delete pod $pods --timeout=60s >/dev/null \
+    || warn "Some old web pods are still stopping; check './deploy.sh status'"
 }
 
 cmd_diff() {
@@ -319,7 +358,9 @@ cmd_uninstall() {
 }
 
 case "${1:-deploy}" in
-  deploy|install|upgrade) cmd_deploy ;;
+  deploy|install|upgrade) cmd_deploy "${2:-}" ;;
+  --now)       cmd_deploy --now ;;
+  hurry)       cmd_hurry ;;
   diff)        cmd_diff ;;
   status)      cmd_status ;;
   set-key)     cmd_set_key "${2:-}" ;;
@@ -334,5 +375,5 @@ case "${1:-deploy}" in
   dev)         cmd_dev ;;
   logs)        cmd_logs "${2:-}" ;;
   uninstall)   cmd_uninstall ;;
-  *) sed -n '2,26p' "$0"; exit 1 ;;
+  *) sed -n '2,30p' "$0"; exit 1 ;;
 esac
