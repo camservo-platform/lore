@@ -62,7 +62,7 @@ async def test_overview_lists_tables_and_lore_counts(app_state, lore_tools, camp
 
 import pytest
 
-from lore.admin import AdminError, delete_campaign, rename_campaign, update_character, worlds
+from lore.admin import AdminError, delete_campaign, delete_character, rename_campaign, update_character, worlds
 
 
 async def _ids(app_state, campaign):
@@ -122,6 +122,28 @@ async def test_delete_world_requires_exact_name(app_state, game_tools, lore_tool
     assert await delete_campaign(app_state.pool, cid, campaign) == campaign
     assert await app_state.pool.fetchval("SELECT count(*) FROM lore_entries WHERE campaign_id = $1", cid) == 0
     assert not [w for w in await worlds(app_state.pool) if w["id"] == cid]
+
+
+async def test_delete_character_keeps_the_chronicle(app_state, game_tools, campaign):
+    await game_tools("create_character", campaign=campaign, name="Wren", max_hp=12, player="alice")
+    await game_tools("add_item", campaign=campaign, character="Wren", item="Rope")
+    cid, char = await _ids(app_state, campaign)
+    history = await app_state.pool.fetchval("SELECT count(*) FROM events WHERE character_id = $1", char)
+    assert history >= 1
+    with pytest.raises(AdminError, match="doesn't match"):
+        await delete_character(app_state.pool, char, "wren", "dana")
+    event = await delete_character(app_state.pool, char, "Wren", "dana")
+    assert event["type"] == "character_deleted" and event["actor"] == "dana"
+    assert event["data"] == {"id": char, "name": "Wren", "player": "alice"}
+    assert await app_state.pool.fetchval("SELECT count(*) FROM characters WHERE id = $1", char) == 0
+    assert await app_state.pool.fetchval("SELECT count(*) FROM inventory_items WHERE character_id = $1", char) == 0
+    # Past events stay, just no longer linked to the character.
+    assert await app_state.pool.fetchval(
+        "SELECT count(*) FROM events WHERE campaign_id = $1 AND type <> 'character_deleted'", cid) >= history + 1
+    [world] = [w for w in await worlds(app_state.pool) if w["id"] == cid]
+    assert world["characters"] == []
+    with pytest.raises(AdminError, match="no longer exists"):
+        await delete_character(app_state.pool, char, "Wren", "dana")
 
 
 async def test_worlds_lists_characters_and_counts(app_state, game_tools, campaign):

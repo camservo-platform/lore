@@ -828,6 +828,19 @@ def create_app(drain: Drain | None = None) -> Starlette:
         log.info("admin %s: %s", user, event["summary"])
         return JSONResponse(event)
 
+    async def admin_delete_character(request: Request) -> Response:
+        user = await require_admin(request)
+        pool, _ = await admin_backend()
+        try:
+            event = await admin.delete_character(
+                pool, int(request.path_params["character_id"]), (await request.json()).get("confirm", ""), user
+            )
+        except admin.AdminError as e:
+            return admin_failed(e)
+        await bus.publish(event)  # open tables refresh their party; the GM sees it in the chronicle
+        log.info("admin %s: %s", user, event["summary"])
+        return JSONResponse(event)
+
     async def admin_npc_voices(request: Request) -> Response:
         await require_admin(request)
         campaign_id = int(request.path_params["campaign_id"])
@@ -995,6 +1008,7 @@ def create_app(drain: Drain | None = None) -> Starlette:
             Route("/api/admin/worlds/{campaign_id:int}/rename", admin_rename_world, methods=["POST"]),
             Route("/api/admin/worlds/{campaign_id:int}/delete", admin_delete_world, methods=["POST"]),
             Route("/api/admin/characters/{character_id:int}", admin_edit_character, methods=["POST"]),
+            Route("/api/admin/characters/{character_id:int}/delete", admin_delete_character, methods=["POST"]),
             Route("/api/admin/presence", admin_presence),
             Route("/api/admin/lore", admin_lore),
             Route("/api/admin/lore/{lore_id:int}", admin_lore_change, methods=["POST"]),

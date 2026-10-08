@@ -270,6 +270,8 @@ dialog .fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(
 dialog label { display: grid; gap: 3px; font-size: 13px; font-weight: 500; }
 dialog .error { color: var(--bad); margin: 0 0 8px; }
 dialog .row.end { justify-content: flex-end; }
+dialog .row.end .push-left { margin-right: auto; }
+dialog button.danger { color: var(--bad); }
 dialog button:not(.primary) { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
 
 body.login { align-items: center; justify-content: center; min-height: 100%; padding: 16px; }

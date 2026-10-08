@@ -1257,6 +1257,21 @@ function editCharacter(world, c) {
   for (const f of ["name", "player", "status", ...CHARACTER_NUMBERS]) form[f].value = c[f] ?? "";
   const dialog = $("character-dialog");
   form.onsubmit = async (e) => {
+    if (e.submitter?.value === "delete") {
+      e.preventDefault();
+      const owner = c.player ? `${c.player}'s character` : "this NPC";
+      if (!confirm(`Permanently delete ${c.name} (${owner}) and their inventory from ${world.name}?\n\nTheir past events stay in the chronicle.`)) return;
+      try {
+        const event = await adminPost(`/api/admin/characters/${c.id}/delete`, { confirm: c.name });
+        dialog.close();
+        toast(event.summary);
+        loadWorldsAdmin();
+      } catch (err) {
+        $("character-error").textContent = err.message;
+        $("character-error").hidden = false;
+      }
+      return;
+    }
     if (e.submitter?.value !== "save") return;
     e.preventDefault();
     const changes = {};

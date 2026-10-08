@@ -254,6 +254,29 @@ async def update_character(
         )
 
 
+async def delete_character(pool: asyncpg.Pool, character_id: int, confirm_name: str, actor: str) -> dict[str, Any]:
+    """Deletes a character and its inventory and logs it. Its past events stay in the
+    chronicle (their character_id becomes NULL). `confirm_name` must match the current
+    name, so a rename in the meantime can't send the delete to the wrong character.
+    Returns the event (publish it after)."""
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            "SELECT ch.campaign_id, ch.name, p.username AS player FROM characters ch"
+            " LEFT JOIN players p ON p.id = ch.player_id WHERE ch.id = $1 FOR UPDATE OF ch",
+            character_id,
+        )
+        if row is None:
+            raise AdminError("That character no longer exists.")
+        if confirm_name != row["name"]:
+            raise AdminError("The confirmation doesn't match the character's name.")
+        await conn.execute("DELETE FROM characters WHERE id = $1", character_id)
+        return await events.record(
+            conn, campaign_id=row["campaign_id"], actor=actor, type="character_deleted",
+            summary=f"An admin removed {row['name']} from the world",
+            data={"id": character_id, "name": row["name"], "player": row["player"]},
+        )
+
+
 def _short(value: Any) -> str:
     return "none" if value in (None, "") else str(value)
 

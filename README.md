@@ -228,9 +228,11 @@ an **Admin** button with:
 
 - **Worlds**: rename or delete a world (deleting asks for its exact name and also clears
   its GM conversation and feeds), and correct character sheets: name, player (or none
-  for an NPC), level, HP, max/temporary HP, defense, gold, status. Each change goes in the
-  world's chronicle with exactly what changed, and players at that table see it live (a
-  renamed world's title updates; a deleted world sends them back to the lobby).
+  for an NPC), level, HP, max/temporary HP, defense, gold, status. A character can also
+  be deleted from its edit dialog, which removes it and its inventory; its past events stay
+  in the chronicle. Each change goes in the world's chronicle with exactly what changed,
+  and players at that table see it live (a renamed world's title updates; a deleted
+  character leaves the party; a deleted world sends them back to the lobby).
 - **Players**: who has Lore open now and when everyone was last seen, where they are
   (lobby, admin, which world) and whether a voice conversation is on. There are no
   login sessions with basic auth, so "online" means the page checked in within 90 s.
