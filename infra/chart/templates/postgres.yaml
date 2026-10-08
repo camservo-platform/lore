@@ -1,0 +1,85 @@
+{{- $ctx := dict "ctx" . "component" "postgres" }}
+{{- $v := .Values.postgres }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lore.fullname" . }}-postgres
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "lore.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: postgres
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "lore.fullname" . }}-postgres
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "lore.fullname" . }}-postgres
+  selector:
+    matchLabels:
+      {{- include "lore.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lore.selectorLabels" $ctx | nindent 8 }}
+    spec:
+      {{- include "lore.scheduling" $v | nindent 6 }}
+      securityContext:
+        fsGroup: 999
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: postgres
+          image: {{ $v.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            {{- range $k, $val := $v.config }}
+            - -c
+            - {{ printf "%s=%v" $k $val | quote }}
+            {{- end }}
+          env:
+            - name: POSTGRES_DB
+              value: {{ $v.database | quote }}
+            - name: POSTGRES_USER
+              value: {{ $v.user | quote }}
+            {{- include "lore.secretEnv" (list . "POSTGRES_PASSWORD" "postgres-password") | nindent 12 }}
+          ports:
+            - name: postgres
+              containerPort: 5432
+          readinessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\" -h 127.0.0.1"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 6
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            # Postgres 18+ images keep PGDATA in a versioned subdirectory of this
+            # path, so major upgrades (pg_upgrade --link) can live side by side.
+            - name: data
+              mountPath: /var/lib/postgresql
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $v.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.persistence.size }}

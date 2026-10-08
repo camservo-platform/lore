@@ -1,0 +1,91 @@
+# Site configuration for the Lore backing services.
+# Apply changes with: ./deploy.sh
+#
+# Hosted (not in the cluster): Deepgram (voice) and the LLM provider.
+# In the cluster: PostgreSQL (hard game state), Qdrant (lore vectors), and a
+# small CPU-only Ollama that serves the embedding model for Qdrant writes/queries.
+
+# Secret holding all credentials. deploy.sh creates it if missing. Keys:
+#   postgres-password   password for the app user (postgres.user)
+#   qdrant-api-key      required on every Qdrant request (api-key header)
+#   deepgram-api-key    from DEEPGRAM_API_KEY at deploy time, or ./deploy.sh set-key
+#   llm-api-key         from LLM_API_KEY at deploy time, or ./deploy.sh set-key
+credentialsSecret: lore-credentials
+
+# Hosted LLM used for world generation and the GM itself. Only exposed to the app
+# through the lore-config ConfigMap; nothing in this chart calls it.
+llm:
+  provider: anthropic
+  model: claude-opus-5-5
+
+deepgram:
+  # Deepgram models the app should use; exposed via lore-config.
+  sttModel: nova-3
+  ttsModel: aura-2-thalia-en
+
+postgres:
+  image: postgres:18.6
+  database: lore
+  user: lore
+  # local-path volumes pin the pod to whichever node it first lands on; use
+  # nodeSelector to choose a reliable node for game state.
+  nodeSelector: {}
+  tolerations: []
+  persistence:
+    storageClass: local-path
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 512Mi
+  # Appended to postgresql.conf via command-line flags; tuned for a Pi.
+  config:
+    shared_buffers: 128MB
+    effective_cache_size: 384MB
+    work_mem: 4MB
+    max_connections: "50"
+
+qdrant:
+  image: qdrant/qdrant:v1.19.1
+  nodeSelector: {}
+  tolerations: []
+  persistence:
+    storageClass: local-path
+    size: 5Gi
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+
+# CPU embedding server (Ollama API on :11434). Set enabled: false and point
+# embeddings.url at another endpoint (e.g. http://ollama.ollama:11434) to reuse
+# the GPU Ollama instead.
+embeddings:
+  enabled: true
+  image: ollama/ollama:0.34.4
+  # Pulled into the model volume by an init container on every start (no-op once cached).
+  # nomic-embed-text: 768-dim vectors, ~270MB, fine on a Pi CPU.
+  model: nomic-embed-text
+  dimensions: 768
+  # Only used when enabled: false.
+  url: ""
+  nodeSelector: {}
+  tolerations: []
+  persistence:
+    storageClass: local-path
+    size: 2Gi
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      memory: 1536Mi
+
+# Restrict Postgres, Qdrant and embeddings to clients in this namespace
+# (kubectl port-forward still works).
+networkPolicy:
+  enabled: true

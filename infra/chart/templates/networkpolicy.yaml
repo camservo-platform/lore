@@ -1,0 +1,20 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- range $component := list "postgres" "qdrant" "embeddings" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "lore.fullname" $ }}-{{ $component }}
+  labels:
+    {{- include "lore.labels" (dict "ctx" $ "component" $component) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "lore.selectorLabels" (dict "ctx" $ "component" $component) | nindent 6 }}
+  policyTypes: [Ingress]
+  ingress:
+    # Any pod in this namespace; nothing from other namespaces.
+    - from:
+        - podSelector: {}
+{{- end }}
+{{- end }}

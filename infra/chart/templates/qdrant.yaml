@@ -1,0 +1,88 @@
+{{- $ctx := dict "ctx" . "component" "qdrant" }}
+{{- $v := .Values.qdrant }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lore.fullname" . }}-qdrant
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "lore.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: 6333
+      targetPort: http
+    - name: grpc
+      port: 6334
+      targetPort: grpc
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "lore.fullname" . }}-qdrant
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ include "lore.fullname" . }}-qdrant
+  selector:
+    matchLabels:
+      {{- include "lore.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lore.selectorLabels" $ctx | nindent 8 }}
+    spec:
+      {{- include "lore.scheduling" $v | nindent 6 }}
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: qdrant
+          image: {{ $v.image }}
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: QDRANT__TELEMETRY_DISABLED
+              value: "true"
+            - name: QDRANT__STORAGE__STORAGE_PATH
+              value: /qdrant/storage
+            - name: QDRANT__STORAGE__SNAPSHOTS_PATH
+              value: /qdrant/storage/snapshots
+            {{- include "lore.secretEnv" (list . "QDRANT__SERVICE__API_KEY" "qdrant-api-key") | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 6333
+            - name: grpc
+              containerPort: 6334
+          # /readyz and /livez are exempt from the API key.
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            failureThreshold: 6
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}
+          volumeMounts:
+            - name: data
+              mountPath: /qdrant/storage
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        {{- with $v.persistence.storageClass }}
+        storageClassName: {{ . }}
+        {{- end }}
+        resources:
+          requests:
+            storage: {{ $v.persistence.size }}

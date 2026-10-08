@@ -1,0 +1,24 @@
+{{- $ctx := dict "ctx" . "component" "config" }}
+# Non-secret connection settings for the app and MCP servers. Use with
+#   envFrom: [{configMapRef: {name: lore-config}}]
+# plus secretKeyRef entries from the credentials secret for passwords and keys.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lore.fullname" . }}-config
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+data:
+  LORE_CREDENTIALS_SECRET: {{ .Values.credentialsSecret | quote }}
+  PGHOST: {{ include "lore.postgresHost" . | quote }}
+  PGPORT: "5432"
+  PGDATABASE: {{ .Values.postgres.database | quote }}
+  PGUSER: {{ .Values.postgres.user | quote }}
+  QDRANT_URL: {{ include "lore.qdrantUrl" . | quote }}
+  EMBEDDINGS_URL: {{ include "lore.embeddingsUrl" . | quote }}
+  EMBEDDINGS_MODEL: {{ .Values.embeddings.model | quote }}
+  EMBEDDINGS_DIMENSIONS: {{ .Values.embeddings.dimensions | quote }}
+  LLM_PROVIDER: {{ .Values.llm.provider | quote }}
+  LLM_MODEL: {{ .Values.llm.model | quote }}
+  DEEPGRAM_STT_MODEL: {{ .Values.deepgram.sttModel | quote }}
+  DEEPGRAM_TTS_MODEL: {{ .Values.deepgram.ttsModel | quote }}
