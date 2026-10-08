@@ -375,13 +375,16 @@ const speaker = {
   pending: "",
   queued: 0,      // chunks fetched or playing
   speaking: false,
+  silenced: false, // stopped by the player: the rest of this reply stays quiet
   queue: Promise.resolve(),
   audio: null,
   generation: 0,
   begin() {
     this.pending = "";
+    this.silenced = false;
   },
   feed(text) {
+    if (this.silenced) return;
     this.pending += text;
     const cut = this.lastBoundary(this.pending);
     if (cut > 160) {
@@ -390,7 +393,7 @@ const speaker = {
     }
   },
   flush() {
-    if (this.pending.trim()) this.say(this.pending);
+    if (!this.silenced && this.pending.trim()) this.say(this.pending);
     this.pending = "";
   },
   lastBoundary(text) {
@@ -430,9 +433,11 @@ const speaker = {
   setSpeaking(speaking) {
     if (speaking === this.speaking) return;
     this.speaking = speaking;
+    $("stop-voice").hidden = !speaking;
     talk.playback(speaking);
   },
   stop() {
+    this.silenced = true;
     this.generation++;
     this.queued = 0;
     this.setSpeaking(false);
@@ -577,6 +582,12 @@ const talk = {
 };
 
 $("mic").addEventListener("click", () => (talk.active ? talk.stop() : talk.start()));
+
+// Silence the GM's current reply (the conversation, if any, keeps listening).
+$("stop-voice").addEventListener("click", () => speaker.stop());
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && speaker.speaking) speaker.stop();
+});
 
 // ---------- admin ---------------------------------------------------------------------
 

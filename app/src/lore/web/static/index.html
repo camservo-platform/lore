@@ -57,9 +57,14 @@
       </form>
       <div class="talk" id="talk" hidden>
         <p class="heard" id="heard" hidden></p>
-        <button class="mic" id="mic" aria-pressed="false">
-          <span class="mic-dot"></span><span id="mic-label">Start conversation</span>
-        </button>
+        <div class="talk-buttons">
+          <button class="mic" id="mic" aria-pressed="false">
+            <span class="mic-dot"></span><span id="mic-label">Start conversation</span>
+          </button>
+          <button class="stop-voice" id="stop-voice" title="Stop the Game Master speaking (Esc)" hidden>
+            <span class="stop-square"></span>Stop speaking
+          </button>
+        </div>
         <p class="hint"><span id="talk-status"></span> Talk naturally: the Game Master answers when you pause, and you can interrupt it any time. Headphones work best.</p>
       </div>
     </section>
