@@ -45,3 +45,31 @@ def test_describe_error_unwraps_groups_and_api_messages():
     assert describe_error(ExceptionGroup("tg", [ExceptionGroup("inner", [api])])) == (
         "The Game Master couldn't reach the model: Your credit balance is too low.")
     assert describe_error(ValueError("boom")) == "Something went wrong: boom"
+
+
+def test_english_voices_from_deepgram_catalogue():
+    from lore.voice import english_voices
+    catalogue = {"tts": [
+        {"canonical_name": "aura-2-zeus-en", "architecture": "aura-2", "languages": ["en", "en-US"],
+         "metadata": {"display_name": "Zeus", "accent": "American", "tags": ["masculine", "deep", "trustworthy", "smooth", "calm"]}},
+        {"canonical_name": "aura-2-agathe-fr", "architecture": "aura-2", "languages": ["fr"], "metadata": {}},
+        {"canonical_name": "aura-asteria-en", "architecture": "aura", "languages": ["en"], "metadata": {}},
+        {"canonical_name": "aura-2-cora-en", "architecture": "aura-2", "languages": ["en"],
+         "metadata": {"display_name": "Cora", "tags": ["feminine", "smooth"]}},
+    ]}
+    assert english_voices(catalogue) == [
+        {"id": "aura-2-cora-en", "name": "Cora", "accent": "", "gender": "feminine", "traits": ["smooth"]},
+        {"id": "aura-2-zeus-en", "name": "Zeus", "accent": "American", "gender": "masculine",
+         "traits": ["deep", "trustworthy", "smooth"]},
+    ]
+
+
+async def test_voice_resolve_accepts_only_listed_voices():
+    import time
+    from lore.voice import Voice
+    voice = Voice("key", "aura-2-thalia-en")
+    voice._voices, voice._voices_at = [{"id": "aura-2-zeus-en"}], time.monotonic()
+    assert await voice.resolve("aura-2-zeus-en") == "aura-2-zeus-en"
+    assert await voice.resolve("not-a-voice&model=other") == "aura-2-thalia-en"
+    assert await voice.resolve(None) == "aura-2-thalia-en"
+    await voice.aclose()

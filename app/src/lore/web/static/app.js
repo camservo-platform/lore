@@ -11,6 +11,7 @@ const state = {
   busy: false,
   myTurns: new Set(),  // turn ids started from this tab (skip their echo on the feed)
   feed: null,
+  voice: null,         // the GM's TTS voice (null: server default)
 };
 
 // ---------- helpers -------------------------------------------------------------------
@@ -415,7 +416,8 @@ const speaker = {
     this.queued++;
     // The element starts downloading (streamed) right away, so later chunks are ready by
     // the time earlier ones finish; each plays once everything before it has.
-    const el = new Audio(`/api/tts?text=${encodeURIComponent(clean)}`);
+    const voice = state.voice ? `&voice=${encodeURIComponent(state.voice)}` : "";
+    const el = new Audio(`/api/tts?text=${encodeURIComponent(clean)}${voice}`);
     el.preload = "auto";
     this.loading.add(el);
     this.queue = this.queue.then(async () => {
@@ -588,6 +590,45 @@ const talk = {
 };
 
 $("mic").addEventListener("click", () => (talk.active ? talk.stop() : talk.start()));
+
+// ---------- GM voice -----------------------------------------------------------------
+
+const VOICE_KEY = "lore.voice";
+const PREVIEW = "Welcome, traveler. Pull up a chair; I'll be your Game Master tonight.";
+
+async function loadVoices() {
+  const select = $("gm-voice");
+  try {
+    const { default: fallback, voices } = await (await api("/api/voices")).json();
+    let saved = null;
+    try { saved = localStorage.getItem(VOICE_KEY); } catch {}
+    select.innerHTML = "";
+    for (const v of voices) {
+      const traits = [v.accent, v.gender, ...v.traits].filter(Boolean).join(", ");
+      select.add(new Option(traits ? `${v.name} (${traits})` : v.name, v.id));
+    }
+    if (![...select.options].some((o) => o.value === fallback)) select.add(new Option(fallback, fallback), 0);
+    const pick = [...select.options].some((o) => o.value === saved) ? saved : fallback;
+    select.value = pick;
+    state.voice = pick;
+  } catch (e) {
+    $("voice-picker").hidden = true;
+  }
+}
+
+$("gm-voice").addEventListener("change", (e) => {
+  state.voice = e.target.value;
+  try { localStorage.setItem(VOICE_KEY, state.voice); } catch {}
+  previewVoice();
+});
+
+function previewVoice() {
+  speaker.stop();
+  speaker.begin();
+  speaker.say(PREVIEW);
+}
+
+$("preview-voice").addEventListener("click", previewVoice);
 
 // Silence the GM's current reply (the conversation, if any, keeps listening).
 $("stop-voice").addEventListener("click", () => speaker.stop());
@@ -766,6 +807,7 @@ $("vector-form").addEventListener("submit", async (e) => {
   } catch (e) {
     toast(e.message);
   }
+  if (state.speechAvailable) loadVoices();
   if (!state.speechAvailable) {
     const b = document.querySelector('.mode button[data-mode="speech"]');
     b.disabled = true;

@@ -384,6 +384,16 @@ def create_app() -> Starlette:
 
         return sse(events())
 
+    async def voices(request: Request) -> Response:
+        user_of(request)
+        tts = require_voice()
+        try:
+            listed = await tts.voices()
+        except Exception:
+            log.exception("couldn't list Deepgram voices")
+            listed = []
+        return JSONResponse({"default": tts.default_voice, "voices": listed})
+
     async def voice_ticket(request: Request) -> Response:
         user = user_of(request)
         require_voice()
@@ -465,12 +475,13 @@ def create_app() -> Starlette:
         playing as the first bytes arrive instead of after the whole clip is synthesised."""
         user_of(request)
         if request.method == "GET":
-            text = request.query_params.get("text", "").strip()
+            params = request.query_params
         else:
-            text = (await request.json()).get("text", "").strip()
+            params = await request.json()
+        text, chosen = (params.get("text") or "").strip(), params.get("voice")
         if not text:
             raise HTTPException(400, "No text.")
-        audio = require_voice().speak(text)
+        audio = require_voice().speak(text, chosen)
         # Pull the first chunk before answering so Deepgram errors become a proper status.
         first = await anext(audio)
 
@@ -535,6 +546,7 @@ def create_app() -> Starlette:
             Route("/api/campaigns/{campaign_id:int}/lines", recent_lines),
             Route("/api/campaigns/{campaign_id:int}/feed", feed),
             Route("/api/tts", tts, methods=["GET", "POST"]),
+            Route("/api/voices", voices),
             Route("/api/voice/ticket", voice_ticket, methods=["POST"]),
             WebSocketRoute("/ws/voice", voice_socket),
             Route("/api/admin/overview", admin_overview),

@@ -132,6 +132,12 @@ form#forge label { display: grid; gap: 4px; font-weight: 500; }
   display: inline-flex; align-items: center; gap: 10px; padding: 14px 28px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--line); background: var(--surface); font-weight: 600; box-shadow: var(--shadow);
 }
+.voice-picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; font-size: 13px; }
+.voice-picker label { color: var(--muted); font-weight: 500; }
+.voice-picker select { max-width: 22rem; padding: 5px 8px; }
+.voice-picker button {
+  background: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; cursor: pointer; color: var(--muted);
+}
 .talk-buttons { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 .stop-voice {
   display: inline-flex; align-items: center; gap: 8px; padding: 14px 22px; border-radius: 999px; cursor: pointer;
@@ -141,7 +147,13 @@ form#forge label { display: grid; gap: 4px; font-weight: 500; }
 .stop-square { width: 10px; height: 10px; border-radius: 2px; background: var(--accent); }
 .mic-dot { width: 12px; height: 12px; border-radius: 50%; background: var(--muted); }
 .mic[aria-pressed="true"] { border-color: var(--bad); }
-.mic[aria-pressed="true"] .talk-buttons { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
+.mic[aria-pressed="true"] .voice-picker { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; justify-content: center; font-size: 13px; }
+.voice-picker label { color: var(--muted); font-weight: 500; }
+.voice-picker select { max-width: 22rem; padding: 5px 8px; }
+.voice-picker button {
+  background: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; cursor: pointer; color: var(--muted);
+}
+.talk-buttons { display: flex; gap: 10px; flex-wrap: wrap; justify-content: center; }
 .stop-voice {
   display: inline-flex; align-items: center; gap: 8px; padding: 14px 22px; border-radius: 999px; cursor: pointer;
   border: 1px solid var(--line); background: var(--surface-2); font-weight: 600; color: var(--ink);
