@@ -102,15 +102,18 @@ ensure_secrets() {
 
 ensure_api_keys() {
   local name key env
-  for name in deepgram llm; do
+  for name in deepgram llm github-client-id github-client-secret; do
     key="$name-api-key"
-    env="$(tr '[:lower:]' '[:upper:]' <<<"$name")_API_KEY"
+    case "$name" in
+      github-*) key="$name"; env="$(tr '[:lower:]-' '[:upper:]_' <<<"$name")" ;;
+      *) env="$(tr '[:lower:]' '[:upper:]' <<<"$name")_API_KEY" ;;
+    esac
     if [[ -n "${!env:-}" ]]; then
       if [[ "$(secret_value "$SECRET" "$key")" != "${!env}" ]]; then
         log "Storing $key from \$$env"
         put_secret_key "$SECRET" "$key" "${!env}"
       fi
-    elif ! has_secret_key "$key"; then
+    elif ! has_secret_key "$key" && [[ "$name" != github-* ]]; then
       warn "No $key yet: add $env to secrets.env (see secrets.env.example) and redeploy"
     fi
   done

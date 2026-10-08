@@ -13,6 +13,8 @@ import json
 import logging
 import os
 import uuid
+from html import escape
+from urllib.parse import quote
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -20,11 +22,12 @@ from pathlib import Path
 from typing import Any
 
 import anthropic
+import httpx
 from redis.asyncio import Redis
 from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket
 from starlette.staticfiles import StaticFiles
@@ -36,12 +39,12 @@ from lore.events import stream_key
 from lore.gm import (
     GameMaster, Toolbox, ToolCallError, instructions_version, style_note, system_prompt, updated_instructions,
 )
-from lore.mcp.common import USER_HEADER
 from lore.settings import Settings
 from lore.events import EventBus
 from lore.usage import Presence, Usage
 from lore.voice import Voice
 from lore.web import conversation
+from lore.web.auth import COOKIE, Auth, AuthError, parse_user_map
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +74,11 @@ class WebSettings:
     tts_model: str
     dev_user: str | None
     admins: frozenset[str]
+    public_url: str
+    passwords_file: str | None
+    github_client_id: str | None
+    github_client_secret: str | None
+    github_users: str
 
     @classmethod
     def from_env(cls) -> "WebSettings":
@@ -90,6 +98,11 @@ class WebSettings:
             stt_model=env.get("DEEPGRAM_STT_MODEL", "flux-general-en"),
             tts_model=env.get("DEEPGRAM_TTS_MODEL", "aura-2-pandora-en"),
             dev_user=env.get("LORE_DEV_USER") or None,
+            public_url=env.get("LORE_PUBLIC_URL", "http://localhost:8080"),
+            passwords_file=env.get("LORE_PASSWORDS_FILE") or None,
+            github_client_id=env.get("GITHUB_CLIENT_ID") or None,
+            github_client_secret=env.get("GITHUB_CLIENT_SECRET") or None,
+            github_users=env.get("LORE_GITHUB_USERS", ""),
             admins=frozenset(u.strip() for u in env.get("LORE_ADMINS", "").split(",") if u.strip()),
         )
 
@@ -147,6 +160,18 @@ def _complete_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ):
         return messages[:-1]
     return messages
+
+
+def render_login(*, github: bool, passwords: bool, error: str | None) -> str:
+    options = []
+    if github:
+        options.append('<a class="primary" href="/auth/github">Sign in with GitHub</a>')
+    if passwords:
+        options.append('<a class="secondary" href="/auth/password">Sign in with a password</a>')
+    if not options:
+        options.append("<p>No sign-in method is configured yet.</p>")
+    notice = f'<p class="error">{escape(error)}</p>' if error else ""
+    return (STATIC / "login.html").read_text().replace("{{options}}", "\n".join(options)).replace("{{error}}", notice)
 
 
 def describe_error(e: BaseException) -> str:
@@ -234,14 +259,20 @@ def create_app() -> Starlette:
                 admin_db["embedder"] = OllamaEmbedder(Settings.from_env())
         return admin_db["pool"], admin_db["embedder"]
 
-    def user_of(request: Request) -> str:
-        user = request.headers.get(USER_HEADER) or settings.dev_user
+    auth = Auth(
+        redis, public_url=settings.public_url, passwords_file=settings.passwords_file,
+        github_client_id=settings.github_client_id, github_client_secret=settings.github_client_secret,
+        github_users=parse_user_map(settings.github_users), dev_user=settings.dev_user,
+    )
+
+    async def user_of(request: Request) -> str:
+        user = await auth.user(request)
         if not user:
             raise HTTPException(401, "Not signed in.")
         return user
 
-    def require_admin(request: Request) -> str:
-        user = user_of(request)
+    async def require_admin(request: Request) -> str:
+        user = await user_of(request)
         if user not in settings.admins:
             raise HTTPException(403, "Admins only.")
         return user
@@ -251,26 +282,85 @@ def create_app() -> Starlette:
             raise HTTPException(503, "Speech is not configured (no DEEPGRAM_API_KEY).")
         return voice
 
-    async def index(_request: Request) -> Response:
+    async def index(request: Request) -> Response:
+        if not await auth.user(request):
+            return RedirectResponse("/login", status_code=303)
         return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+
+    # --- signing in ----------------------------------------------------------------
+
+    def signed_in(user: str, provider: str, session_id: str) -> Response:
+        log.info("%s signed in (%s)", user, provider)
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(COOKIE, session_id, **auth.cookie_args())
+        return response
+
+    async def login_page(request: Request) -> Response:
+        if await auth.user(request):
+            return RedirectResponse("/", status_code=303)
+        return HTMLResponse(render_login(
+            github=auth.github_enabled, passwords=auth.passwords.available, error=request.query_params.get("error")
+        ))
+
+    async def login_basic(request: Request) -> Response:
+        """Asks the browser for a password (its native prompt), then starts a session."""
+        user = auth.basic_user(request)
+        if not user:
+            return HTMLResponse(render_login(github=auth.github_enabled, passwords=True,
+                                             error="That username and password weren't accepted."),
+                                status_code=401, headers={"WWW-Authenticate": 'Basic realm="lore"'})
+        return signed_in(user, "password", await auth.start_session(user, "password", request))
+
+    async def login_github(_request: Request) -> Response:
+        if not auth.github_enabled:
+            return RedirectResponse("/login", status_code=303)
+        return RedirectResponse(await auth.github_start(), status_code=303)
+
+    async def github_callback(request: Request) -> Response:
+        try:
+            user, login = await auth.github_finish(request.query_params.get("code", ""),
+                                                   request.query_params.get("state", ""))
+        except (AuthError, httpx.HTTPError) as e:
+            return RedirectResponse(f"/login?error={quote(str(e))}", status_code=303)
+        if not user:
+            log.warning("refused GitHub sign-in from %s (not in the allow list)", login)
+            return RedirectResponse(
+                f"/login?error={quote(f'The GitHub account {login} is not allowed to play here.')}", status_code=303)
+        return signed_in(user, "github", await auth.start_session(user, f"github:{login}", request))
+
+    async def logout(request: Request) -> Response:
+        await auth.end_session(request)
+        response = JSONResponse({"signed_out": True})
+        response.delete_cookie(COOKIE, path="/")
+        return response
+
+    async def admin_sessions(request: Request) -> Response:
+        await require_admin(request)
+        return JSONResponse(await auth.sessions())
+
+    async def admin_revoke_session(request: Request) -> Response:
+        admin_user = await require_admin(request)
+        revoked = await auth.revoke(request.path_params["session"])
+        log.info("admin %s revoked session %s", admin_user, request.path_params["session"])
+        return JSONResponse({"revoked": revoked})
 
     async def healthz(_request: Request) -> Response:
         return JSONResponse({"status": "ok"})
 
     async def me(request: Request) -> Response:
-        user = user_of(request)
+        user = await user_of(request)
         await presence.seen(user, "lobby")
         return JSONResponse({"user": user, "speech": voice is not None, "admin": user in settings.admins})
 
     async def campaigns(request: Request) -> Response:
-        user = user_of(request)
+        user = await user_of(request)
         await presence.seen(user, "lobby")
         async with toolbox.session(user) as tools:
             return JSONResponse(await tools.call_json("list_campaigns"))
 
     async def campaign_state(request: Request) -> Response:
         name = request.query_params["name"]
-        async with toolbox.session(user_of(request)) as tools:
+        async with toolbox.session(await user_of(request)) as tools:
             try:
                 characters, events = await asyncio.gather(
                     tools.call_json("list_characters", campaign=name),
@@ -285,7 +375,7 @@ def create_app() -> Starlette:
         return JSONResponse({"characters": list(sheets), "events": events})
 
     async def forge_world(request: Request) -> Response:
-        user = user_of(request)
+        user = await user_of(request)
         body = await request.json()
         return sse(worldgen.forge(
             llm, settings.llm_model, toolbox, user, body.get("theme", ""), (body.get("name") or "").strip() or None,
@@ -374,7 +464,7 @@ def create_app() -> Starlette:
         return task
 
     async def take_turn(request: Request) -> Response:
-        user = user_of(request)
+        user = await user_of(request)
         table = Table(redis, int(request.path_params["campaign_id"]))
         body = await request.json()
         mode = "speech" if body.get("mode") == "speech" else "text"
@@ -401,7 +491,7 @@ def create_app() -> Starlette:
         return sse(events())
 
     async def voices(request: Request) -> Response:
-        user_of(request)
+        await user_of(request)
         tts = require_voice()
         try:
             listed = await tts.voices()
@@ -411,7 +501,7 @@ def create_app() -> Starlette:
         return JSONResponse({"default": tts.default_voice, "voices": listed})
 
     async def voice_ticket(request: Request) -> Response:
-        user = user_of(request)
+        user = await user_of(request)
         require_voice()
         body = await request.json()
         ticket = uuid.uuid4().hex
@@ -455,15 +545,29 @@ def create_app() -> Starlette:
             await usage.voice(asyncio.get_running_loop().time() - started)
         log.info("voice session ended: %s at %s", user, campaign)
 
+    async def player_roll(request: Request) -> Response:
+        """A player's own roll, logged under their name so the table (and the GM) see it."""
+        user = await user_of(request)
+        body = await request.json()
+        args = {"notation": (body.get("notation") or "").strip(), "reason": (body.get("reason") or "").strip() or "a roll",
+                "campaign": body["campaign"]}
+        if body.get("character"):
+            args["character"] = body["character"]
+        async with toolbox.session(user) as tools:
+            try:
+                return JSONResponse(await tools.call_json("roll_dice", **args))
+            except ToolCallError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+
     async def recent_lines(request: Request) -> Response:
         """This player's own recent lines at this table (other players' turns aren't included)."""
-        user = user_of(request)
+        user = await user_of(request)
         table = Table(redis, int(request.path_params["campaign_id"]))
         count = max(1, min(int(request.query_params.get("count", "40")), LINES_KEPT))
         return JSONResponse(await table.recent_lines(user, count))
 
     async def reset_table(request: Request) -> Response:
-        user_of(request)
+        await user_of(request)
         table = Table(redis, int(request.path_params["campaign_id"]))
         if await redis.exists(table.lock):
             raise HTTPException(409, "Wait for the Game Master to finish first.")
@@ -473,7 +577,7 @@ def create_app() -> Starlette:
     async def feed(request: Request) -> Response:
         """Live game events and other players' turns for one campaign. While it's open the
         player counts as present at this table."""
-        user = user_of(request)
+        user = await user_of(request)
         campaign_id = int(request.path_params["campaign_id"])
         table = Table(redis, campaign_id)
 
@@ -498,7 +602,7 @@ def create_app() -> Starlette:
     async def tts(request: Request) -> Response:
         """MP3 for `text`, streamed. GET (text in the query) lets an <audio> element start
         playing as the first bytes arrive instead of after the whole clip is synthesised."""
-        user_of(request)
+        await user_of(request)
         if request.method == "GET":
             params = request.query_params
         else:
@@ -519,7 +623,7 @@ def create_app() -> Starlette:
         return StreamingResponse(body(), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
     async def admin_worlds(request: Request) -> Response:
-        await presence.seen(require_admin(request), "admin")
+        await presence.seen(await require_admin(request), "admin")
         pool, _ = await admin_backend()
         return JSONResponse(await admin.worlds(pool))
 
@@ -527,7 +631,7 @@ def create_app() -> Starlette:
         return JSONResponse({"error": str(e)}, status_code=400)
 
     async def admin_rename_world(request: Request) -> Response:
-        user = require_admin(request)
+        user = await require_admin(request)
         campaign_id = int(request.path_params["campaign_id"])
         pool, _ = await admin_backend()
         try:
@@ -539,7 +643,7 @@ def create_app() -> Starlette:
         return JSONResponse(event)
 
     async def admin_delete_world(request: Request) -> Response:
-        user = require_admin(request)
+        user = await require_admin(request)
         campaign_id = int(request.path_params["campaign_id"])
         pool, _ = await admin_backend()
         try:
@@ -558,7 +662,7 @@ def create_app() -> Starlette:
         return JSONResponse({"deleted": name})
 
     async def admin_edit_character(request: Request) -> Response:
-        user = require_admin(request)
+        user = await require_admin(request)
         pool, _ = await admin_backend()
         try:
             event = await admin.update_character(
@@ -571,7 +675,7 @@ def create_app() -> Starlette:
         return JSONResponse(event)
 
     async def admin_presence(request: Request) -> Response:
-        await presence.seen(require_admin(request), "admin")
+        await presence.seen(await require_admin(request), "admin")
         pool, _ = await admin_backend()
         names = {r["id"]: r["name"] for r in await pool.fetch("SELECT id, name FROM campaigns")}
         people = await presence.everyone()
@@ -581,7 +685,7 @@ def create_app() -> Starlette:
 
     async def admin_tables(request: Request) -> Response:
         """Every world's GM conversation: size, mode, last activity, and any turn in progress."""
-        require_admin(request)
+        await require_admin(request)
         pool, _ = await admin_backend()
         names = {r["id"]: r["name"] for r in await pool.fetch("SELECT id, name FROM campaigns")}
         tables = []
@@ -603,31 +707,31 @@ def create_app() -> Starlette:
         return JSONResponse(sorted(tables, key=lambda t: t["idle_seconds"] or 0))
 
     async def admin_unlock_table(request: Request) -> Response:
-        user = require_admin(request)
+        user = await require_admin(request)
         table = Table(redis, int(request.path_params["campaign_id"]))
         await redis.delete(table.lock)
         log.info("admin %s cleared the turn lock for world %s", user, request.path_params["campaign_id"])
         return JSONResponse({"unlocked": True})
 
     async def admin_reset_table(request: Request) -> Response:
-        user = require_admin(request)
+        user = await require_admin(request)
         table = Table(redis, int(request.path_params["campaign_id"]))
         await table.reset()
         log.info("admin %s reset the GM conversation for world %s", user, request.path_params["campaign_id"])
         return JSONResponse({"reset": True})
 
     async def admin_usage(request: Request) -> Response:
-        require_admin(request)
+        await require_admin(request)
         days = max(1, min(int(request.query_params.get("days", "14")), 120))
         return JSONResponse(await usage.summary(days))
 
     async def admin_overview(request: Request) -> Response:
-        require_admin(request)
+        await require_admin(request)
         pool, _ = await admin_backend()
         return JSONResponse(await admin.overview(pool))
 
     async def admin_sql(request: Request) -> Response:
-        user = require_admin(request)
+        user = await require_admin(request)
         body = await request.json()
         sql, allow_writes = body.get("sql", ""), bool(body.get("allow_writes"))
         log.info("admin %s ran SQL (writes=%s): %s", user, allow_writes, " ".join(sql.split())[:1000])
@@ -635,7 +739,7 @@ def create_app() -> Starlette:
         return JSONResponse(await admin.run_sql(pool, sql, allow_writes=allow_writes))
 
     async def admin_vector(request: Request) -> Response:
-        require_admin(request)
+        await require_admin(request)
         body = await request.json()
         query = (body.get("query") or "").strip()
         if not query:
@@ -666,6 +770,13 @@ def create_app() -> Starlette:
         routes=[
             Route("/", index),
             Route("/healthz", healthz),
+            Route("/login", login_page),
+            Route("/auth/password", login_basic),
+            Route("/auth/github", login_github),
+            Route("/auth/github/callback", github_callback),
+            Route("/auth/logout", logout, methods=["POST"]),
+            Route("/api/admin/sessions", admin_sessions),
+            Route("/api/admin/sessions/{session}/revoke", admin_revoke_session, methods=["POST"]),
             Route("/api/me", me),
             Route("/api/campaigns", campaigns),
             Route("/api/worlds", forge_world, methods=["POST"]),
@@ -673,6 +784,7 @@ def create_app() -> Starlette:
             Route("/api/campaigns/{campaign_id:int}/turn", take_turn, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/reset", reset_table, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/lines", recent_lines),
+            Route("/api/campaigns/{campaign_id:int}/roll", player_roll, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/feed", feed),
             Route("/api/tts", tts, methods=["GET", "POST"]),
             Route("/api/voices", voices),

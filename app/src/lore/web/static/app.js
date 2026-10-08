@@ -54,6 +54,10 @@ async function api(path, options = {}) {
     headers: options.body ? { "Content-Type": "application/json" } : {},
     ...options,
   });
+  if (resp.status === 401) {
+    location.href = "/login";
+    throw new Error("Signed out.");
+  }
   if (!resp.ok) {
     let detail = resp.statusText;
     try { detail = (await resp.json()).detail || detail; } catch {}
@@ -136,6 +140,13 @@ async function showLobby() {
 }
 
 $("home").addEventListener("click", showLobby);
+
+$("user").addEventListener("click", async () => {
+  if (!confirm(`Sign out ${state.user}?`)) return;
+  talk.stop();
+  await fetch("/auth/logout", { method: "POST" }).catch(() => {});
+  location.href = "/login";
+});
 
 // The button says what will happen: a themed world, or one the GM invents.
 $("forge").theme.addEventListener("input", (e) => {
@@ -314,6 +325,7 @@ async function refreshState() {
   try {
     const data = await (await api(`/api/campaigns/${state.campaign.id}/state?name=${encodeURIComponent(state.campaign.name)}`)).json();
     renderParty(data.characters);
+    renderDiceCharacters(data.characters);
     const log = $("log");
     log.innerHTML = "";
     data.events.slice().reverse().forEach((ev) => log.append(eventItem(ev, false)));
@@ -365,6 +377,60 @@ function renderParty(characters) {
   }
 }
 
+// ---------- dice -------------------------------------------------------------------
+
+function rollCard(ev) {
+  const d = ev.data || {};
+  const faces = (d.rolls || []).map((g) => `${g.dice}: ${g.results.join(", ")}`).join(" · ");
+  const mod = d.modifier ? ` ${d.modifier > 0 ? "+" : "−"}${Math.abs(d.modifier)}` : "";
+  const el = document.createElement("div");
+  el.className = "roll-card";
+  el.innerHTML = `<span class="total">${d.total ?? "?"}</span>
+    <span><strong>${escapeHtml(ev.summary.split(" rolled ")[0])}</strong> rolled ${escapeHtml(d.notation || "")}${
+      d.reason ? ` for ${escapeHtml(d.reason)}` : ""}<br><span class="faces">${escapeHtml(faces)}${mod}</span></span>`;
+  // The GM rolls before narrating: put the card above the reply that's still streaming.
+  const streaming = [...$("transcript").querySelectorAll(".msg.gm.streaming")].pop();
+  if (streaming) $("transcript").insertBefore(el, streaming);
+  else $("transcript").append(el);
+  el.scrollIntoView({ block: "end" });
+}
+
+function renderDiceCharacters(characters) {
+  const select = $("dice-character");
+  const keep = select.value;
+  const mine = characters.filter((c) => c.player === state.user);
+  select.innerHTML = '<option value="">No character</option>' +
+    mine.map((c) => `<option>${escapeHtml(c.name)}</option>`).join("");
+  select.value = [...select.options].some((o) => o.value === keep) ? keep : (mine[0]?.name || "");
+}
+
+async function rollDice(notation) {
+  if (!state.campaign || !notation) return;
+  try {
+    await adminlessPost(`/api/campaigns/${state.campaign.id}/roll`, {
+      campaign: state.campaign.name, notation,
+      reason: $("dice-reason").value.trim(), character: $("dice-character").value || null,
+    });
+    $("dice-reason").value = "";
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function adminlessPost(path, body) {
+  const resp = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  if (resp.status === 401) { location.href = "/login"; throw new Error("Signed out."); }
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || data.detail || resp.statusText);
+  return data;
+}
+
+document.querySelectorAll("[data-die]").forEach((b) => b.addEventListener("click", () => rollDice(b.dataset.die)));
+$("dice-form").addEventListener("submit", (e) => {
+  e.preventDefault();
+  rollDice($("dice-notation").value.trim());
+});
+
 function eventItem(ev, fresh) {
   const li = document.createElement("li");
   if (fresh) li.className = "fresh";
@@ -388,6 +454,7 @@ function openFeed() {
       state.campaign.name = ev.event.data.new;
       $("campaign-title").textContent = state.campaign.name;
     }
+    if (ev.type === "event" && ev.event.type === "roll") rollCard(ev.event);
     if (ev.type === "event") {
       $("log").prepend(eventItem(ev.event, true));
       clearTimeout(openFeed.refresh);

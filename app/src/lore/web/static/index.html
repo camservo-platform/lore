@@ -19,7 +19,7 @@
         <button role="radio" data-mode="speech" aria-checked="false">Speech</button>
       </div>
       <button class="admin-link" id="admin-link" aria-pressed="false" hidden>Admin</button>
-      <span class="user" id="user"></span>
+      <button class="user-menu" id="user" title="Sign out"></button>
     </div>
   </header>
 
@@ -78,6 +78,25 @@
       <section>
         <h3>Party</h3>
         <ul class="party" id="party"></ul>
+      </section>
+      <section>
+        <h3>Dice</h3>
+        <form class="dice" id="dice-form">
+          <div class="dice-quick">
+            <button type="button" data-die="d4">d4</button><button type="button" data-die="d6">d6</button>
+            <button type="button" data-die="d8">d8</button><button type="button" data-die="d10">d10</button>
+            <button type="button" data-die="d12">d12</button><button type="button" data-die="d20">d20</button>
+            <button type="button" data-die="d100">d100</button>
+          </div>
+          <div class="dice-custom">
+            <input id="dice-notation" placeholder="2d6+3" aria-label="Dice notation">
+            <input id="dice-reason" placeholder="for… (optional)" aria-label="What the roll is for">
+          </div>
+          <div class="dice-custom">
+            <select id="dice-character" aria-label="Rolling character"></select>
+            <button type="submit" class="primary">Roll</button>
+          </div>
+        </form>
       </section>
       <section>
         <h3>Chronicle</h3>

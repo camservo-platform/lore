@@ -142,9 +142,15 @@ mcp:
 # so replicas can be added freely.
 web:
   replicas: 1
-  # Usernames (ingress logins) allowed into the admin view, which can run SQL against
-  # the game database and search the lore vectors directly. Set in values.local.yaml.
+  # Lore names allowed into the admin view, which can run SQL against the game database
+  # and search the lore vectors directly. Set in values.local.yaml.
   admins: []
+  # GitHub sign-in: GitHub login -> Lore name, e.g. {octocat: alice}. Only listed
+  # accounts may sign in. The OAuth app's client id and secret go in secrets.env
+  # (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET); its callback URL is
+  # https://<ingress.host>/auth/github/callback. Passwords (./deploy.sh add-user) keep
+  # working alongside it. Set in values.local.yaml.
+  githubUsers: {}
   nodeSelector: {}
   tolerations: []
   resources:

@@ -272,6 +272,41 @@ dialog .error { color: var(--bad); margin: 0 0 8px; }
 dialog .row.end { justify-content: flex-end; }
 dialog button:not(.primary) { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
 
+body.login { align-items: center; justify-content: center; min-height: 100%; padding: 16px; }
+.login-card {
+  background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+  padding: 32px 28px; width: min(380px, 100%); display: grid; gap: 10px; text-align: center;
+}
+.login-card h1 { font: 700 44px/1 var(--serif); color: var(--accent); margin: 0; }
+.login-card .error { color: var(--bad); margin: 0; }
+.login-options { display: grid; gap: 10px; margin-top: 10px; }
+.login-options a { display: block; padding: 11px 16px; border-radius: 8px; text-decoration: none; font-weight: 600; }
+.login-options a.primary { background: var(--accent); color: var(--accent-ink); }
+.login-options a.secondary { border: 1px solid var(--line); color: var(--ink); }
+.user-menu { background: none; border: 0; color: var(--muted); font-size: 13px; cursor: pointer; padding: 0; }
+.user-menu:hover { color: var(--ink); text-decoration: underline; }
+
+.dice { display: grid; gap: 6px; margin-top: 8px; }
+.dice-quick { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; }
+.dice-quick button {
+  border: 1px solid var(--line); background: var(--bg); border-radius: 6px; padding: 5px 0; cursor: pointer;
+  font: 600 12px var(--sans); color: var(--ink);
+}
+.dice-quick button:hover { border-color: var(--accent); }
+.dice-custom { display: flex; gap: 6px; }
+.dice-custom input, .dice-custom select { flex: 1; min-width: 0; padding: 6px 8px; font-size: 13px; }
+.dice-custom button { padding: 6px 14px; }
+.roll-card {
+  align-self: center; display: flex; align-items: center; gap: 12px; padding: 8px 14px; border-radius: 10px;
+  background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow); font-size: 13px; max-width: 40rem;
+}
+.roll-card .total {
+  font: 700 24px/1 var(--serif); min-width: 2.2ch; text-align: center; color: var(--accent);
+  animation: tumble 0.6s ease-out;
+}
+.roll-card .faces { color: var(--muted); font-variant-numeric: tabular-nums; }
+@keyframes tumble { 0% { transform: rotate(-200deg) scale(0.3); opacity: 0; } 100% { transform: none; opacity: 1; } }
+
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px);
   background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; box-shadow: var(--shadow); z-index: 10;

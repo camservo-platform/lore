@@ -176,7 +176,10 @@ class ToolSession:
 
 
 class ToolCallError(Exception):
-    pass
+    def __str__(self) -> str:
+        # MCP prefixes tool errors with "Error executing tool <name>: "; players want the reason.
+        text = super().__str__()
+        return text.split(": ", 1)[1] if text.startswith("Error executing tool ") and ": " in text else text
 
 
 def echo_content(content: list[Any]) -> list[dict[str, Any]]:

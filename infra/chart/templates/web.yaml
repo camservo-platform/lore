@@ -53,6 +53,20 @@ spec:
             {{- include "lore.secretEnv" (list . "PGPASSWORD" "postgres-password") | nindent 12 }}
             {{- include "lore.secretEnv" (list . "REDIS_PASSWORD" "redis-password") | nindent 12 }}
             {{- include "lore.secretEnv" (list . "LLM_API_KEY" "llm-api-key") | nindent 12 }}
+            # Behind Traefik: trust its X-Forwarded-Proto so the app knows requests are HTTPS.
+            # Only the ingress controller (and this namespace) can reach the pod.
+            - name: FORWARDED_ALLOW_IPS
+              value: "*"
+            - name: LORE_PASSWORDS_FILE
+              value: /etc/lore/users/users
+            {{- range $env, $key := dict "GITHUB_CLIENT_ID" "github-client-id" "GITHUB_CLIENT_SECRET" "github-client-secret" }}
+            - name: {{ $env }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $.Values.credentialsSecret }}
+                  key: {{ $key }}
+                  optional: true
+            {{- end }}
             # Optional: without it the UI offers text mode only.
             - name: DEEPGRAM_API_KEY
               valueFrom:
@@ -74,5 +88,14 @@ spec:
               port: http
             initialDelaySeconds: 10
             periodSeconds: 30
+          volumeMounts:
+            # The password logins (htpasswd); updates reach the pod within about a minute.
+            - name: users
+              mountPath: /etc/lore/users
+              readOnly: true
           resources:
             {{- toYaml $v.resources | nindent 12 }}
+      volumes:
+        - name: users
+          secret:
+            secretName: {{ .Values.usersSecret }}

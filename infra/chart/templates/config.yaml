@@ -29,5 +29,9 @@ data:
   LLM_SPEECH_MODEL: {{ .Values.llm.speechModel | quote }}
   LLM_EFFORT: {{ .Values.llm.effort | quote }}
   LORE_ADMINS: {{ join "," .Values.web.admins | quote }}
+  {{- $pairs := list }}
+  {{- range $login, $name := .Values.web.githubUsers }}{{ $pairs = append $pairs (printf "%s:%s" $login $name) }}{{ end }}
+  LORE_GITHUB_USERS: {{ join "," $pairs | quote }}
+  LORE_PUBLIC_URL: {{ if .Values.ingress.host }}{{ printf "https://%s" .Values.ingress.host | quote }}{{ else }}"http://localhost:8080"{{ end }}
   DEEPGRAM_STT_MODEL: {{ .Values.deepgram.sttModel | quote }}
   DEEPGRAM_TTS_MODEL: {{ .Values.deepgram.ttsModel | quote }}

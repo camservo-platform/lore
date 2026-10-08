@@ -1,8 +1,38 @@
 {{- with .Values.ingress }}
 {{- if .host }}
 {{- $ctx := dict "ctx" $ "component" "ingress" }}
-# Basic auth in front of everything public. Traefik replaces any client-sent
-# X-Lore-User with the authenticated username and strips the credentials.
+# The web app signs players in itself (GitHub or password, see lore/web/auth.py), so its
+# route has no proxy auth. This Ingress owns the TLS certificate.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "lore.fullname" $ }}
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+  {{- with .annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .className }}
+  rules:
+    - host: {{ .host }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "lore.fullname" $ }}-web
+                port:
+                  name: http
+  tls:
+    - hosts:
+        - {{ .host }}
+      secretName: {{ .tlsSecretName }}
+---
+# MCP clients (e.g. Claude Code) keep Traefik basic auth: it replaces any client-sent
+# X-Lore-User with the authenticated username, which the MCP servers record as the actor.
 apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
@@ -19,13 +49,15 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: {{ include "lore.fullname" $ }}
+  name: {{ include "lore.fullname" $ }}-mcp
   labels:
     {{- include "lore.labels" $ctx | nindent 4 }}
   annotations:
     traefik.ingress.kubernetes.io/router.middlewares: {{ $.Release.Namespace }}-{{ include "lore.fullname" $ }}-auth@kubernetescrd
-    {{- with .annotations }}
-    {{- toYaml . | nindent 4 }}
+    {{- range $key, $value := .annotations }}
+    {{- if not (hasPrefix "cert-manager.io/" $key) }}
+    {{ $key }}: {{ $value | quote }}
+    {{- end }}
     {{- end }}
 spec:
   ingressClassName: {{ .className }}
@@ -33,13 +65,6 @@ spec:
     - host: {{ .host }}
       http:
         paths:
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ include "lore.fullname" $ }}-web
-                port:
-                  name: http
           {{- range $name, $server := $.Values.mcp.servers }}
           - path: {{ $server.path }}
             pathType: Prefix
@@ -49,37 +74,6 @@ spec:
                 port:
                   name: http
           {{- end }}
-  tls:
-    - hosts:
-        - {{ .host }}
-      secretName: {{ .tlsSecretName }}
----
-# Voice WebSockets skip basic auth: browsers don't reliably send it on WebSocket
-# upgrades. The app authenticates each one with a single-use ticket instead, which it
-# only issues to a request that passed basic auth.
-apiVersion: networking.k8s.io/v1
-kind: Ingress
-metadata:
-  name: {{ include "lore.fullname" $ }}-ws
-  labels:
-    {{- include "lore.labels" $ctx | nindent 4 }}
-  {{- with .annotations }}
-  annotations:
-    {{- toYaml . | nindent 4 }}
-  {{- end }}
-spec:
-  ingressClassName: {{ .className }}
-  rules:
-    - host: {{ .host }}
-      http:
-        paths:
-          - path: /ws/
-            pathType: Prefix
-            backend:
-              service:
-                name: {{ include "lore.fullname" $ }}-web
-                port:
-                  name: http
   tls:
     - hosts:
         - {{ .host }}
