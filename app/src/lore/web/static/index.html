@@ -94,6 +94,10 @@
       <div class="tabs" role="tablist">
         <button role="tab" data-tab="sql" aria-selected="true">SQL</button>
         <button role="tab" data-tab="vector" aria-selected="false">Vector search</button>
+        <button role="tab" data-tab="worlds" aria-selected="false">Worlds</button>
+        <button role="tab" data-tab="players" aria-selected="false">Players</button>
+        <button role="tab" data-tab="tables" aria-selected="false">Tables</button>
+        <button role="tab" data-tab="usage" aria-selected="false">Usage</button>
       </div>
 
       <section class="panel" id="tab-sql">
@@ -123,6 +127,29 @@
         </form>
         <ol class="hits" id="vector-result"></ol>
       </section>
+
+      <section class="panel" id="tab-worlds" hidden>
+        <p class="hint">Rename or delete worlds, and correct character sheets. Every change is written to that world's chronicle and shown to players live.</p>
+        <div id="worlds-admin"></div>
+      </section>
+
+      <section class="panel" id="tab-players" hidden>
+        <p class="hint">Who has Lore open right now, and when everyone else was last seen. Refreshes every 15 seconds.</p>
+        <div class="grid-wrap"><table class="grid" id="players-table"></table></div>
+      </section>
+
+      <section class="panel" id="tab-tables" hidden>
+        <p class="hint">Each world's Game Master conversation. Clear a stuck turn if a world says the GM is busy and nothing is happening; reset to make the GM start a fresh conversation (the world, characters and chronicle are kept).</p>
+        <div class="grid-wrap"><table class="grid" id="tables-table"></table></div>
+      </section>
+
+      <section class="panel" id="tab-usage" hidden>
+        <div class="row">
+          <span class="hint">LLM tokens and estimated cost at list prices (a guide, not a bill), turns per player, speech characters and voice-conversation time.</span>
+          <select id="usage-days"><option value="7">Last 7 days</option><option value="30" selected>Last 30 days</option><option value="90">Last 90 days</option></select>
+        </div>
+        <div id="usage-summary"></div>
+      </section>
     </div>
 
     <aside class="sidebar admin-side">
@@ -136,6 +163,31 @@
       </section>
     </aside>
   </main>
+
+  <dialog id="character-dialog">
+    <form method="dialog" id="character-form">
+      <h3>Edit character</h3>
+      <p class="hint" id="character-context"></p>
+      <div class="fields">
+        <label>Name <input name="name" required></label>
+        <label>Player <input name="player" placeholder="empty for an NPC"></label>
+        <label>Level <input name="level" type="number" min="1"></label>
+        <label>HP <input name="hp" type="number" min="0"></label>
+        <label>Max HP <input name="max_hp" type="number" min="1"></label>
+        <label>Temporary HP <input name="temp_hp" type="number" min="0"></label>
+        <label>Defense <input name="defense" type="number"></label>
+        <label>Gold <input name="gold" type="number" min="0"></label>
+        <label>Status
+          <select name="status"><option>alive</option><option>unconscious</option><option>dead</option></select>
+        </label>
+      </div>
+      <p class="error" id="character-error" hidden></p>
+      <div class="row end">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button value="save" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
 
   <div class="toast" id="toast" role="alert" hidden></div>
   <script src="/static/app.js"></script>

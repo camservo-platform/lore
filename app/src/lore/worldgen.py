@@ -56,7 +56,8 @@ Do not reuse any of these existing campaign names, and make the world unlike the
 
 
 async def generate(
-    client: anthropic.AsyncAnthropic, model: str, theme: str, name: str | None, existing: list[str]
+    client: anthropic.AsyncAnthropic, model: str, theme: str, name: str | None, existing: list[str],
+    on_usage=None,
 ) -> dict[str, Any]:
     async with client.beta.messages.stream(
         model=model,
@@ -76,6 +77,8 @@ async def generate(
         }],
     ) as stream:
         response = await stream.get_final_message()
+    if on_usage:
+        await on_usage(response.model, response.usage)
     if response.stop_reason == "refusal":
         raise WorldGenError("The model declined to create that world; try a different theme.")
     if response.stop_reason == "max_tokens":
@@ -88,7 +91,8 @@ async def generate(
 
 
 async def forge(
-    client: anthropic.AsyncAnthropic, model: str, toolbox: Toolbox, user: str, theme: str, name: str | None
+    client: anthropic.AsyncAnthropic, model: str, toolbox: Toolbox, user: str, theme: str, name: str | None,
+    on_usage=None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Yields progress events; the last is {"type": "done", "campaign": {...}} or {"type": "error"}."""
     try:
@@ -98,7 +102,7 @@ async def forge(
                 yield {"type": "error", "text": f"A world named {name!r} already exists."}
                 return
             yield {"type": "status", "text": "Dreaming up the world…"}
-            world = await generate(client, model, theme, name, existing)
+            world = await generate(client, model, theme, name, existing, on_usage)
             yield {"type": "status", "text": f"Founding {world['name']}…"}
             campaign = await tools.call_json("create_campaign", name=world["name"], setting=world["setting"])
             entries = world["lore"] + [{

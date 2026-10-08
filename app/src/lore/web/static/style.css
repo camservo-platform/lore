@@ -247,6 +247,31 @@ table.grid td.null { color: var(--muted); font-style: italic; }
 .schema code { display: block; font: 12px/1.6 ui-monospace, Menlo, monospace; color: var(--muted); padding-left: 12px; }
 .schema li.meta { color: var(--muted); }
 
+.world-admin { border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; display: grid; gap: 8px; background: var(--bg); }
+#worlds-admin { display: grid; gap: 12px; }
+.world-admin .head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.world-admin .head strong { font: 700 20px/1.2 var(--serif); }
+.world-admin .head .meta { color: var(--muted); font-size: 12px; flex: 1; }
+.small-button {
+  background: none; border: 1px solid var(--line); border-radius: 6px; padding: 3px 10px; cursor: pointer; font-size: 12px; color: var(--ink);
+}
+.small-button:hover { border-color: var(--accent); }
+.small-button.danger { color: var(--bad); }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--line); margin-right: 6px; }
+.dot.on { background: var(--good); }
+.usage-totals { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.usage-totals div { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--bg); }
+.usage-totals dt { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+.usage-totals dd { margin: 0; font: 600 18px/1.3 var(--sans); font-variant-numeric: tabular-nums; }
+table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: tabular-nums; }
+dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); padding: 18px 20px; width: min(520px, calc(100% - 32px)); }
+dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+dialog .fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; margin: 10px 0; }
+dialog label { display: grid; gap: 3px; font-size: 13px; font-weight: 500; }
+dialog .error { color: var(--bad); margin: 0 0 8px; }
+dialog .row.end { justify-content: flex-end; }
+dialog button:not(.primary) { background: none; border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; cursor: pointer; }
+
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px);
   background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; box-shadow: var(--shadow); z-index: 10;

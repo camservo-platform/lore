@@ -8,7 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AsyncExitStack, asynccontextmanager
 from typing import Any
 
@@ -195,12 +195,19 @@ def style_note(mode: str) -> str:
     return SPEECH_STYLE if mode == "speech" else TEXT_STYLE
 
 
+UsageSink = Callable[[str, Any], Awaitable[None]]
+
+
 class GameMaster:
-    def __init__(self, client: anthropic.AsyncAnthropic, toolbox: Toolbox, model: str, effort: str):
+    def __init__(
+        self, client: anthropic.AsyncAnthropic, toolbox: Toolbox, model: str, effort: str,
+        on_usage: UsageSink | None = None,
+    ):
         self._client = client
         self._toolbox = toolbox
         self._model = model
         self._effort = effort
+        self._on_usage = on_usage  # (model, usage) after each response, for cost tracking
 
     async def turn(
         self, campaign: str, user: str, system: str, messages: list[dict[str, Any]], model: str | None = None
@@ -229,6 +236,8 @@ class GameMaster:
                         log.warning("unparseable tool input, retrying (%d)", attempt + 1)
                 if final is None:
                     raise RuntimeError("the model kept producing unparseable tool input")
+                if self._on_usage:
+                    await self._on_usage(final.model, final.usage)
                 if final.stop_reason == "refusal":
                     # Discard any partial output; the history stays as it was sent.
                     yield {"type": "error", "text": "The Game Master declined to continue that scene. Try another approach."}

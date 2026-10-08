@@ -7,6 +7,7 @@ from typing import Any
 
 import asyncpg
 
+from lore import events
 from lore.embeddings import Embedder
 
 MAX_ROWS = 500
@@ -123,3 +124,135 @@ async def overview(pool: asyncpg.Pool) -> dict[str, Any]:
         """
     )
     return {"tables": list(tables.values()), "lore": [dict(r) for r in lore]}
+
+
+# --- world and character management --------------------------------------------------
+
+class AdminError(Exception):
+    """A refused admin change, with a message for the admin."""
+
+
+async def worlds(pool: asyncpg.Pool) -> list[dict[str, Any]]:
+    """Every campaign with its characters and activity, newest first."""
+    campaigns = await pool.fetch(
+        """
+        SELECT c.id, c.name, c.setting, c.created_at,
+               (SELECT count(*) FROM lore_entries l WHERE l.campaign_id = c.id) AS lore,
+               (SELECT count(*) FROM events e WHERE e.campaign_id = c.id) AS events,
+               (SELECT max(occurred_at) FROM events e WHERE e.campaign_id = c.id) AS last_activity
+        FROM campaigns c ORDER BY c.created_at DESC
+        """
+    )
+    characters = await pool.fetch(
+        """
+        SELECT ch.id, ch.campaign_id, ch.name, p.username AS player, ch.race, ch.class, ch.level, ch.hp,
+               ch.max_hp, ch.temp_hp, ch.defense, ch.gold, ch.status, ch.location
+        FROM characters ch LEFT JOIN players p ON p.id = ch.player_id ORDER BY lower(ch.name)
+        """
+    )
+    by_campaign: dict[int, list[dict[str, Any]]] = {}
+    for ch in characters:
+        by_campaign.setdefault(ch["campaign_id"], []).append({k: _json_value(v) for k, v in dict(ch).items()})
+    return [
+        {k: _json_value(v) for k, v in dict(c).items()} | {"characters": by_campaign.get(c["id"], [])}
+        for c in campaigns
+    ]
+
+
+async def rename_campaign(pool: asyncpg.Pool, campaign_id: int, new_name: str, actor: str) -> dict[str, Any]:
+    """Renames a campaign and logs it. Returns the event (publish it after)."""
+    new_name = new_name.strip()
+    if not new_name:
+        raise AdminError("The new name can't be empty.")
+    async with pool.acquire() as conn, conn.transaction():
+        old = await conn.fetchval("SELECT name FROM campaigns WHERE id = $1 FOR UPDATE", campaign_id)
+        if old is None:
+            raise AdminError("That world no longer exists.")
+        try:
+            await conn.execute("UPDATE campaigns SET name = $2 WHERE id = $1", campaign_id, new_name)
+        except asyncpg.UniqueViolationError:
+            raise AdminError(f"A world named {new_name!r} already exists.") from None
+        return await events.record(
+            conn, campaign_id=campaign_id, actor=actor, type="campaign_renamed",
+            summary=f"The world {old} is now called {new_name}", data={"old": old, "new": new_name},
+        )
+
+
+async def delete_campaign(pool: asyncpg.Pool, campaign_id: int, confirm_name: str) -> str:
+    """Deletes a campaign and everything in it (characters, events, lore). `confirm_name`
+    must match its name exactly, as a guard against deleting the wrong world."""
+    async with pool.acquire() as conn, conn.transaction():
+        name = await conn.fetchval("SELECT name FROM campaigns WHERE id = $1 FOR UPDATE", campaign_id)
+        if name is None:
+            raise AdminError("That world no longer exists.")
+        if confirm_name != name:
+            raise AdminError("The confirmation doesn't match the world's name.")
+        await conn.execute("DELETE FROM campaigns WHERE id = $1", campaign_id)
+    return name
+
+
+CHARACTER_FIELDS = {"name", "player", "level", "hp", "max_hp", "temp_hp", "defense", "gold", "status"}
+# Plain explanations for the characters table's CHECK constraints (see 0001_initial.sql).
+CONSTRAINT_MESSAGES = {
+    "characters_check": "HP must be between 0 and max HP.",
+    "characters_level_check": "Level must be at least 1.",
+    "characters_max_hp_check": "Max HP must be at least 1.",
+    "characters_temp_hp_check": "Temporary HP can't be negative.",
+    "characters_gold_check": "Gold can't be negative.",
+    "characters_status_check": "Status must be alive, unconscious or dead.",
+}
+
+
+async def update_character(
+    pool: asyncpg.Pool, character_id: int, changes: dict[str, Any], actor: str
+) -> dict[str, Any]:
+    """Applies an admin's corrections to a character sheet and logs exactly what changed.
+    `player` reassigns ownership (empty makes the character an NPC). Returns the event."""
+    unknown = set(changes) - CHARACTER_FIELDS
+    if unknown:
+        raise AdminError(f"Can't edit {', '.join(sorted(unknown))}.")
+    async with pool.acquire() as conn, conn.transaction():
+        before = await conn.fetchrow(
+            "SELECT ch.*, p.username AS player FROM characters ch LEFT JOIN players p ON p.id = ch.player_id"
+            " WHERE ch.id = $1 FOR UPDATE OF ch",
+            character_id,
+        )
+        if before is None:
+            raise AdminError("That character no longer exists.")
+        diff = {k: (before[k], v) for k, v in changes.items() if v != before[k] and not (k == "player" and not v and not before[k])}
+        if not diff:
+            raise AdminError("Nothing changed.")
+        sets, args = [], [character_id]
+        for field, (_, value) in diff.items():
+            if field == "player":
+                player_id = None
+                if value:
+                    player_id = await conn.fetchval(
+                        "INSERT INTO players (username) VALUES ($1)"
+                        " ON CONFLICT (username) DO UPDATE SET username = EXCLUDED.username RETURNING id",
+                        value,
+                    )
+                args.append(player_id)
+                sets.append(f"player_id = ${len(args)}")
+            else:
+                args.append(value.strip() if isinstance(value, str) else value)
+                sets.append(f"{field} = ${len(args)}")
+        try:
+            await conn.execute(f"UPDATE characters SET {', '.join(sets)}, updated_at = now() WHERE id = $1", *args)
+        except asyncpg.UniqueViolationError:
+            raise AdminError(f"Another character in this world is already named {changes['name']!r}.") from None
+        except asyncpg.CheckViolationError as e:
+            raise AdminError(CONSTRAINT_MESSAGES.get(e.constraint_name, f"Invalid value ({e.constraint_name}).")) from None
+        except (asyncpg.NotNullViolationError, asyncpg.DataError) as e:
+            raise AdminError(f"Invalid value: {e.args[0] if e.args else e}") from None
+        name = diff["name"][1] if "name" in diff else before["name"]
+        described = ", ".join(f"{k} {_short(old)} → {_short(new)}" for k, (old, new) in diff.items())
+        return await events.record(
+            conn, campaign_id=before["campaign_id"], character_id=character_id, actor=actor, type="admin_edit",
+            summary=f"An admin corrected {name}: {described}",
+            data={k: {"from": _json_value(old), "to": _json_value(new)} for k, (old, new) in diff.items()},
+        )
+
+
+def _short(value: Any) -> str:
+    return "none" if value in (None, "") else str(value)

@@ -379,6 +379,15 @@ function openFeed() {
   const feed = new EventSource(`/api/campaigns/${state.campaign.id}/feed`);
   feed.onmessage = (msg) => {
     const ev = JSON.parse(msg.data);
+    if (ev.type === "event" && ev.event.type === "campaign_deleted") {
+      toast(ev.event.summary);
+      showLobby();
+      return;
+    }
+    if (ev.type === "event" && ev.event.type === "campaign_renamed" && state.campaign) {
+      state.campaign.name = ev.event.data.new;
+      $("campaign-title").textContent = state.campaign.name;
+    }
     if (ev.type === "event") {
       $("log").prepend(eventItem(ev.event, true));
       clearTimeout(openFeed.refresh);
@@ -701,12 +710,23 @@ $("admin-link").addEventListener("click", () => {
   return back ? enterCampaign(back, false) : showLobby();
 });
 
-document.querySelectorAll(".tabs button").forEach((tab) =>
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tabs button").forEach((t) => t.setAttribute("aria-selected", String(t === tab)));
-    $("tab-sql").hidden = tab.dataset.tab !== "sql";
-    $("tab-vector").hidden = tab.dataset.tab !== "vector";
-  }));
+const TAB_LOADERS = {
+  worlds: () => loadWorldsAdmin(),
+  players: () => loadPlayers(),
+  tables: () => loadTables(),
+  usage: () => loadUsage(),
+};
+let playersTimer = null;
+
+function openTab(name) {
+  document.querySelectorAll(".tabs button").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === name)));
+  for (const t of document.querySelectorAll(".tabs button")) $(`tab-${t.dataset.tab}`).hidden = t.dataset.tab !== name;
+  clearInterval(playersTimer);
+  if (name === "players") playersTimer = setInterval(() => !$("admin").hidden && loadPlayers(), 15000);
+  TAB_LOADERS[name]?.();
+}
+
+document.querySelectorAll(".tabs button").forEach((tab) => tab.addEventListener("click", () => openTab(tab.dataset.tab)));
 
 for (const [label, sql] of Object.entries(SQL_EXAMPLES)) {
   const b = document.createElement("button");
@@ -822,6 +842,162 @@ $("vector-form").addEventListener("submit", async (e) => {
     out.innerHTML = `<li class="meta">${escapeHtml(err.message)}</li>`;
   }
 });
+
+// Admin: worlds and characters ----------------------------------------------------------
+
+const ago = (iso) => {
+  if (!iso) return "never";
+  const s = (Date.now() - (typeof iso === "number" ? iso * 1000 : Date.parse(iso))) / 1000;
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return `${Math.round(s / 86400)} d ago`;
+};
+
+async function adminPost(path, body) {
+  const resp = await fetch(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(data.error || data.detail || resp.statusText);
+  return data;
+}
+
+async function loadWorldsAdmin() {
+  const box = $("worlds-admin");
+  box.innerHTML = '<p class="hint">Loading…</p>';
+  let worlds;
+  try { worlds = await (await api("/api/admin/worlds")).json(); } catch (e) { box.innerHTML = `<p class="error">${escapeHtml(e.message)}</p>`; return; }
+  box.innerHTML = worlds.length ? "" : '<p class="hint">No worlds yet.</p>';
+  for (const w of worlds) {
+    const el = document.createElement("div");
+    el.className = "world-admin";
+    el.innerHTML = `
+      <div class="head"><strong>${escapeHtml(w.name)}</strong>
+        <span class="meta">${w.characters.length} characters · ${w.lore} lore · ${w.events} events · last activity ${ago(w.last_activity)}</span>
+        <button class="small-button" data-act="rename">Rename</button>
+        <button class="small-button danger" data-act="delete">Delete…</button></div>
+      ${w.characters.length ? `<div class="grid-wrap"><table class="grid"><thead><tr>
+        <th>Character</th><th>Player</th><th class="num">Lvl</th><th class="num">HP</th><th class="num">Def</th><th class="num">Gold</th><th>Status</th><th>Location</th><th></th>
+      </tr></thead><tbody>${w.characters.map((c) => `<tr>
+        <td>${escapeHtml(c.name)}</td><td>${c.player ? escapeHtml(c.player) : '<span class="meta">NPC</span>'}</td>
+        <td class="num">${c.level}</td><td class="num">${c.hp}/${c.max_hp}${c.temp_hp ? ` +${c.temp_hp}` : ""}</td>
+        <td class="num">${c.defense}</td><td class="num">${c.gold}</td><td>${c.status}</td><td>${escapeHtml(c.location || "")}</td>
+        <td><button class="small-button" data-char="${c.id}">Edit</button></td></tr>`).join("")}</tbody></table></div>` : ""}`;
+    el.querySelector('[data-act="rename"]').addEventListener("click", async () => {
+      const name = prompt(`Rename “${w.name}” to:`, w.name);
+      if (!name || name.trim() === w.name) return;
+      try { await adminPost(`/api/admin/worlds/${w.id}/rename`, { name: name.trim() }); toast("World renamed."); loadWorldsAdmin(); }
+      catch (e) { toast(e.message); }
+    });
+    el.querySelector('[data-act="delete"]').addEventListener("click", async () => {
+      const typed = prompt(`This permanently deletes “${w.name}”: its characters, chronicle, lore and GM conversation.\n\nType the world's name to confirm:`);
+      if (typed === null) return;
+      try { await adminPost(`/api/admin/worlds/${w.id}/delete`, { confirm: typed }); toast(`Deleted ${w.name}.`); loadWorldsAdmin(); }
+      catch (e) { toast(e.message); }
+    });
+    el.querySelectorAll("[data-char]").forEach((b) => b.addEventListener("click", () =>
+      editCharacter(w, w.characters.find((c) => String(c.id) === b.dataset.char))));
+    box.append(el);
+  }
+}
+
+const CHARACTER_NUMBERS = ["level", "hp", "max_hp", "temp_hp", "defense", "gold"];
+
+function editCharacter(world, c) {
+  const form = $("character-form");
+  $("character-context").textContent = `${world.name} · changes are logged in the world's chronicle`;
+  $("character-error").hidden = true;
+  for (const f of ["name", "player", "status", ...CHARACTER_NUMBERS]) form[f].value = c[f] ?? "";
+  const dialog = $("character-dialog");
+  form.onsubmit = async (e) => {
+    if (e.submitter?.value !== "save") return;
+    e.preventDefault();
+    const changes = {};
+    for (const f of ["name", "player", "status"]) if ((form[f].value.trim() || null) !== (c[f] || null)) changes[f] = form[f].value.trim();
+    for (const f of CHARACTER_NUMBERS) if (Number(form[f].value) !== c[f]) changes[f] = Number(form[f].value);
+    if (!Object.keys(changes).length) { dialog.close(); return; }
+    try {
+      const event = await adminPost(`/api/admin/characters/${c.id}`, changes);
+      dialog.close();
+      toast(event.summary);
+      loadWorldsAdmin();
+    } catch (err) {
+      $("character-error").textContent = err.message;
+      $("character-error").hidden = false;
+    }
+  };
+  dialog.showModal();
+}
+
+// Admin: players, tables, usage ---------------------------------------------------------
+
+async function loadPlayers() {
+  const table = $("players-table");
+  try {
+    const people = await (await api("/api/admin/presence")).json();
+    table.innerHTML = "<thead><tr><th>Player</th><th>Status</th><th>Where</th><th>Voice</th><th>Last seen</th></tr></thead><tbody>" +
+      (people.length ? people.map((p) => `<tr>
+        <td><span class="dot ${p.online ? "on" : ""}"></span>${escapeHtml(p.user)}</td>
+        <td>${p.online ? "online" : "away"}</td>
+        <td>${p.where === "table" ? escapeHtml(p.campaign || "a deleted world") : escapeHtml(p.where || "")}</td>
+        <td>${p.voice ? "🎙 in conversation" : ""}</td>
+        <td>${ago(p.last_seen)}</td></tr>`).join("") : '<tr><td colspan="5" class="null">Nobody yet.</td></tr>') + "</tbody>";
+  } catch (e) {
+    table.innerHTML = `<tr><td class="null">${escapeHtml(e.message)}</td></tr>`;
+  }
+}
+
+async function loadTables() {
+  const table = $("tables-table");
+  let tables;
+  try { tables = await (await api("/api/admin/tables")).json(); } catch (e) { table.innerHTML = `<tr><td>${escapeHtml(e.message)}</td></tr>`; return; }
+  table.innerHTML = "<thead><tr><th>World</th><th class=\"num\">Messages</th><th class=\"num\">Size</th><th>Mode</th><th>Last turn</th><th>Turn</th><th></th></tr></thead><tbody>" +
+    (tables.length ? tables.map((t) => `<tr>
+      <td>${escapeHtml(t.campaign)}</td><td class="num">${t.messages}</td><td class="num">${(t.bytes / 1024).toFixed(0)} KB</td>
+      <td>${t.mode || ""}</td><td>${t.idle_seconds === null ? "" : ago(Date.now() / 1000 - t.idle_seconds)}</td>
+      <td>${t.turn_running ? `running (lock expires in ${t.lock_expires_in}s)` : "idle"}</td>
+      <td>${t.turn_running ? `<button class="small-button" data-unlock="${t.campaign_id}">Clear stuck turn</button>` : ""}
+          <button class="small-button danger" data-reset="${t.campaign_id}">Reset conversation</button></td></tr>`).join("")
+      : '<tr><td colspan="7" class="null">No GM conversations yet.</td></tr>') + "</tbody>";
+  table.querySelectorAll("[data-unlock]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Clear the turn lock? Only do this if the GM is stuck; a turn that is really running will still finish.")) return;
+    await adminPost(`/api/admin/tables/${b.dataset.unlock}/unlock`, {}).catch((e) => toast(e.message));
+    loadTables();
+  }));
+  table.querySelectorAll("[data-reset]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm("Reset this world's GM conversation? The GM forgets the chat; the world, characters and chronicle stay.")) return;
+    await adminPost(`/api/admin/tables/${b.dataset.reset}/reset`, {}).catch((e) => toast(e.message));
+    loadTables();
+  }));
+}
+
+const money = (n) => `$${n < 1 ? n.toFixed(3) : n.toFixed(2)}`;
+const tokens = (n) => (n >= 1e6 ? `${(n / 1e6).toFixed(2)}M` : n >= 1e3 ? `${(n / 1e3).toFixed(1)}k` : String(n));
+
+async function loadUsage() {
+  const box = $("usage-summary");
+  let u;
+  try { u = await (await api(`/api/admin/usage?days=${$("usage-days").value}`)).json(); } catch (e) { box.innerHTML = `<p class="error">${escapeHtml(e.message)}</p>`; return; }
+  const t = u.totals;
+  const models = Object.entries(t.models);
+  box.innerHTML = `
+    <dl class="usage-totals">
+      <div><dt>Estimated LLM cost</dt><dd>${money(t.cost)}</dd></div>
+      <div><dt>GM turns</dt><dd>${t.turns}</dd></div>
+      <div><dt>Speech characters</dt><dd>${tokens(t.tts_characters)}</dd></div>
+      <div><dt>Voice conversation</dt><dd>${Math.round(t.voice_seconds / 60)} min</dd></div>
+    </dl>
+    ${models.length ? `<div class="grid-wrap"><table class="grid"><thead><tr><th>Model</th><th class="num">Input</th><th class="num">Output</th><th class="num">Cache read</th><th class="num">Cache write</th></tr></thead><tbody>${
+      models.map(([m, k]) => `<tr><td>${escapeHtml(m)}</td><td class="num">${tokens(k.input)}</td><td class="num">${tokens(k.output)}</td><td class="num">${tokens(k.cache_read)}</td><td class="num">${tokens(k.cache_write)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    ${u.unpriced_models.length ? `<p class="hint">No price on file for ${u.unpriced_models.map(escapeHtml).join(", ")}; not included in the estimate.</p>` : ""}
+    <div class="grid-wrap"><table class="grid"><thead><tr><th>Day</th><th class="num">Est. cost</th><th>Turns by player</th><th class="num">Speech chars</th><th class="num">Voice min</th></tr></thead><tbody>${
+      u.days.filter((d) => d.cost || Object.keys(d.turns).length || d.tts_characters || d.voice_seconds).map((d) => `<tr>
+        <td>${d.date}</td><td class="num">${money(d.cost)}</td>
+        <td>${Object.entries(d.turns).map(([p, n]) => `${escapeHtml(p)} ${n}`).join(", ")}</td>
+        <td class="num">${tokens(d.tts_characters)}</td><td class="num">${Math.round(d.voice_seconds / 60)}</td></tr>`).join("") ||
+      '<tr><td colspan="5" class="null">No usage recorded in this period.</td></tr>'}</tbody></table></div>`;
+}
+
+$("usage-days").addEventListener("change", loadUsage);
 
 // ---------- start ---------------------------------------------------------------------
 

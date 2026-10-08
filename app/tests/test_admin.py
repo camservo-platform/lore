@@ -56,3 +56,76 @@ async def test_overview_lists_tables_and_lore_counts(app_state, lore_tools, camp
     assert {"campaigns", "characters", "events", "lore_entries"} <= set(tables)
     assert {"name": "embedding", "type": "vector"} in tables["lore_entries"]["columns"]
     assert any(r["campaign"] == campaign and r["kind"] == "rumor" for r in data["lore"])
+
+
+# --- world and character management ---------------------------------------------------
+
+import pytest
+
+from lore.admin import AdminError, delete_campaign, rename_campaign, update_character, worlds
+
+
+async def _ids(app_state, campaign):
+    cid = await app_state.pool.fetchval("SELECT id FROM campaigns WHERE name = $1", campaign)
+    char = await app_state.pool.fetchval("SELECT id FROM characters WHERE campaign_id = $1", cid)
+    return cid, char
+
+
+async def test_rename_world_logs_and_rejects_duplicates(app_state, game_tools, campaign):
+    cid, _ = await _ids(app_state, campaign)
+    event = await rename_campaign(app_state.pool, cid, f"{campaign} Reborn", "cameron")
+    assert event["type"] == "campaign_renamed" and event["data"] == {"old": campaign, "new": f"{campaign} Reborn"}
+    assert event["actor"] == "cameron"
+    await game_tools("create_campaign", name=f"{campaign} Other", setting="")
+    with pytest.raises(AdminError, match="already exists"):
+        await rename_campaign(app_state.pool, cid, f"{campaign} other", "cameron")
+    with pytest.raises(AdminError, match="empty"):
+        await rename_campaign(app_state.pool, cid, "  ", "cameron")
+
+
+async def test_edit_character_logs_exact_changes(app_state, game_tools, campaign):
+    await game_tools("create_character", campaign=campaign, name="Wren", max_hp=12, player="alice", gold=5)
+    _, char = await _ids(app_state, campaign)
+    event = await update_character(app_state.pool, char, {"name": "Wren Ashby", "hp": 7, "gold": 5, "player": "bob"}, "dana")
+    assert event["type"] == "admin_edit" and event["actor"] == "dana"
+    assert event["summary"] == "An admin corrected Wren Ashby: name Wren → Wren Ashby, hp 12 → 7, player alice → bob"
+    sheet = await game_tools("get_character", campaign=campaign, character="wren ashby")
+    assert (sheet["hp"], sheet["player"], sheet["gold"]) == (7, "bob", 5)
+    await update_character(app_state.pool, char, {"player": ""}, "dana")
+    assert (await game_tools("get_character", campaign=campaign, character="Wren Ashby"))["player"] is None
+
+
+async def test_edit_character_refuses_bad_values(app_state, game_tools, campaign):
+    await game_tools("create_character", campaign=campaign, name="Wren", max_hp=12)
+    await game_tools("create_character", campaign=campaign, name="Quell", max_hp=12)
+    char = await app_state.pool.fetchval(
+        "SELECT ch.id FROM characters ch JOIN campaigns c ON c.id = ch.campaign_id WHERE c.name = $1 AND ch.name = 'Wren'",
+        campaign)
+    with pytest.raises(AdminError, match="HP must be between 0 and max HP"):
+        await update_character(app_state.pool, char, {"hp": 99}, "dana")
+    with pytest.raises(AdminError, match="Gold can't be negative"):
+        await update_character(app_state.pool, char, {"gold": -1}, "dana")
+    with pytest.raises(AdminError, match="already named"):
+        await update_character(app_state.pool, char, {"name": "QUELL"}, "dana")   # names ignore case
+    with pytest.raises(AdminError, match="Nothing changed"):
+        await update_character(app_state.pool, char, {}, "dana")
+    with pytest.raises(AdminError, match="Can't edit"):
+        await update_character(app_state.pool, char, {"campaign_id": 1}, "dana")
+
+
+async def test_delete_world_requires_exact_name(app_state, game_tools, lore_tools, campaign):
+    await game_tools("create_character", campaign=campaign, name="Wren", max_hp=12)
+    await lore_tools("add_lore", campaign=campaign, kind="npc", title="Marta", content="Innkeeper.")
+    cid, _ = await _ids(app_state, campaign)
+    with pytest.raises(AdminError, match="doesn't match"):
+        await delete_campaign(app_state.pool, cid, campaign.lower())
+    assert await delete_campaign(app_state.pool, cid, campaign) == campaign
+    assert await app_state.pool.fetchval("SELECT count(*) FROM lore_entries WHERE campaign_id = $1", cid) == 0
+    assert not [w for w in await worlds(app_state.pool) if w["id"] == cid]
+
+
+async def test_worlds_lists_characters_and_counts(app_state, game_tools, campaign):
+    await game_tools("create_character", campaign=campaign, name="Wren", max_hp=12, player="alice")
+    [world] = [w for w in await worlds(app_state.pool) if w["name"] == campaign]
+    assert world["events"] >= 2 and world["lore"] == 0
+    assert [(c["name"], c["player"], c["hp"]) for c in world["characters"]] == [("Wren", "alice", 12)]

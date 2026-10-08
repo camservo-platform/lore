@@ -1,3 +1,5 @@
+import pytest
+
 from lore.web.app import LINES_KEPT, Table
 
 
@@ -73,3 +75,34 @@ async def test_voice_resolve_accepts_only_listed_voices():
     assert await voice.resolve("not-a-voice&model=other") == "aura-2-thalia-en"
     assert await voice.resolve(None) == "aura-2-thalia-en"
     await voice.aclose()
+
+
+async def test_usage_counts_and_estimates_cost(redis):
+    from types import SimpleNamespace
+    from lore.usage import Usage
+    await redis.delete(*[k async for k in redis.scan_iter("lore:usage:*")] or ["x"])
+    usage = Usage(redis)
+    await usage.llm("claude-opus-5-5", SimpleNamespace(input_tokens=1_000_000, output_tokens=100_000,
+                                                       cache_read_input_tokens=2_000_000, cache_creation_input_tokens=0))
+    await usage.llm("mystery-model", SimpleNamespace(input_tokens=10, output_tokens=5,
+                                                     cache_read_input_tokens=None, cache_creation_input_tokens=None))
+    await usage.turn("alice"); await usage.turn("alice"); await usage.tts(1200); await usage.voice(61.4)
+    summary = await usage.summary(3)
+    today = summary["days"][0]
+    assert today["turns"] == {"alice": 2} and today["tts_characters"] == 1200 and today["voice_seconds"] == 61
+    assert today["models"]["claude-opus-5-5"]["cache_read"] == 2_000_000
+    assert today["cost"] == pytest.approx(4.0 + 2.0 + 0.4)   # input + output + cache reads
+    assert summary["unpriced_models"] == ["mystery-model"] and summary["totals"]["turns"] == 2
+
+
+async def test_presence_tracks_where_and_voice(redis):
+    import time
+    from lore.usage import Presence
+    presence = Presence(redis)
+    await presence.seen("alice", "table", 7)
+    await presence.voice("alice", True)
+    await presence.seen("bob", "lobby")
+    await redis.zadd("lore:presence", {"bob": time.time() - 600})  # bob left ten minutes ago
+    people = {p["user"]: p for p in await presence.everyone()}
+    assert people["alice"]["online"] and people["alice"]["voice"] and people["alice"]["campaign_id"] == 7
+    assert not people["bob"]["online"] and people["bob"]["where"] == "lobby"

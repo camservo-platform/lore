@@ -165,8 +165,23 @@ an **Admin** button with:
 - **Vector search**: semantic search over all lore (or one campaign / kind), with cosine
   similarity scores, using the same embedding model as the lore server.
 
+- **Worlds**: rename or delete a world (deleting asks for its exact name and also clears
+  its GM conversation and feeds), and correct character sheets: name, player (or none
+  for an NPC), level, HP, max/temporary HP, defense, gold, status. Each change goes in the
+  world's chronicle with exactly what changed, and players at that table see it live (a
+  renamed world's title updates; a deleted world sends them back to the lobby).
+- **Players**: who has Lore open now and when everyone was last seen, where they are
+  (lobby, admin, which world) and whether a voice conversation is on. There are no
+  login sessions with basic auth, so "online" means the page checked in within 90 s.
+- **Tables**: each world's GM conversation (messages, size, mode, last turn). Clear a
+  stuck turn lock, or reset the conversation.
+- **Usage**: per day, LLM tokens by model with an estimated cost at list prices (see
+  `lore/usage.py`), GM turns per player, speech characters and voice minutes. Kept for
+  120 days in Redis.
+
 Non-admins get 403 from the admin API. The web pod connects to Postgres directly for
-this, as the app's database user.
+this, as the app's database user, and every admin action is logged with the admin's
+name (`./deploy.sh logs web`).
 
 ## Event log and Redis
 

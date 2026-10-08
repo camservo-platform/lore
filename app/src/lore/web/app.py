@@ -38,6 +38,8 @@ from lore.gm import (
 )
 from lore.mcp.common import USER_HEADER
 from lore.settings import Settings
+from lore.events import EventBus
+from lore.usage import Presence, Usage
 from lore.voice import Voice
 from lore.web import conversation
 
@@ -212,7 +214,10 @@ def create_app() -> Starlette:
     )
     llm = anthropic.AsyncAnthropic(api_key=settings.llm_api_key)
     toolbox = Toolbox(settings.mcp_servers)
-    gm = GameMaster(llm, toolbox, settings.llm_model, settings.llm_effort)
+    usage = Usage(redis)
+    presence = Presence(redis)
+    bus = EventBus(redis)
+    gm = GameMaster(llm, toolbox, settings.llm_model, settings.llm_effort, on_usage=usage.llm)
     voice = (
         Voice(settings.deepgram_api_key, settings.tts_model) if settings.deepgram_api_key else None
     )
@@ -254,10 +259,13 @@ def create_app() -> Starlette:
 
     async def me(request: Request) -> Response:
         user = user_of(request)
+        await presence.seen(user, "lobby")
         return JSONResponse({"user": user, "speech": voice is not None, "admin": user in settings.admins})
 
     async def campaigns(request: Request) -> Response:
-        async with toolbox.session(user_of(request)) as tools:
+        user = user_of(request)
+        await presence.seen(user, "lobby")
+        async with toolbox.session(user) as tools:
             return JSONResponse(await tools.call_json("list_campaigns"))
 
     async def campaign_state(request: Request) -> Response:
@@ -280,7 +288,8 @@ def create_app() -> Starlette:
         user = user_of(request)
         body = await request.json()
         return sse(worldgen.forge(
-            llm, settings.llm_model, toolbox, user, body.get("theme", ""), (body.get("name") or "").strip() or None
+            llm, settings.llm_model, toolbox, user, body.get("theme", ""), (body.get("name") or "").strip() or None,
+            on_usage=usage.llm,
         ))
 
     async def acquire_turn(table: Table, turn_id: str, wait: float = 0) -> bool:
@@ -337,6 +346,7 @@ def create_app() -> Starlette:
         if notes:
             messages.append({"role": "system", "content": "\n\n".join(notes)})
         reply = ""
+        await usage.turn(user)
         try:
             model = settings.llm_speech_model if mode == "speech" else settings.llm_model
             async for event in gm.turn(campaign, user, system, messages, model=model):
@@ -436,7 +446,13 @@ def create_app() -> Starlette:
             ))
 
         log.info("voice session started: %s at %s", user, campaign)
-        await conversation.serve(ws, settings.deepgram_api_key, settings.stt_model, play)
+        started = asyncio.get_running_loop().time()
+        await presence.voice(user, True)
+        try:
+            await conversation.serve(ws, settings.deepgram_api_key, settings.stt_model, play)
+        finally:
+            await presence.voice(user, False)
+            await usage.voice(asyncio.get_running_loop().time() - started)
         log.info("voice session ended: %s at %s", user, campaign)
 
     async def recent_lines(request: Request) -> Response:
@@ -455,13 +471,16 @@ def create_app() -> Starlette:
         return JSONResponse({"reset": True})
 
     async def feed(request: Request) -> Response:
-        """Live game events and other players' turns for one campaign."""
-        user_of(request)
-        table = Table(redis, int(request.path_params["campaign_id"]))
+        """Live game events and other players' turns for one campaign. While it's open the
+        player counts as present at this table."""
+        user = user_of(request)
+        campaign_id = int(request.path_params["campaign_id"])
+        table = Table(redis, campaign_id)
 
         async def events() -> AsyncIterator[dict[str, Any] | None]:
             last = {table.events: "$", table.chat: "$"}
             while not await request.is_disconnected():
+                await presence.seen(user, "table", campaign_id)
                 batches = await redis.xread(last, block=15000)
                 if not batches:
                     yield None  # keepalive through proxies
@@ -488,6 +507,7 @@ def create_app() -> Starlette:
         if not text:
             raise HTTPException(400, "No text.")
         audio = require_voice().speak(text, chosen)
+        await usage.tts(len(text))
         # Pull the first chunk before answering so Deepgram errors become a proper status.
         first = await anext(audio)
 
@@ -497,6 +517,109 @@ def create_app() -> Starlette:
                 yield chunk
 
         return StreamingResponse(body(), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
+
+    async def admin_worlds(request: Request) -> Response:
+        await presence.seen(require_admin(request), "admin")
+        pool, _ = await admin_backend()
+        return JSONResponse(await admin.worlds(pool))
+
+    def admin_failed(e: admin.AdminError) -> Response:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    async def admin_rename_world(request: Request) -> Response:
+        user = require_admin(request)
+        campaign_id = int(request.path_params["campaign_id"])
+        pool, _ = await admin_backend()
+        try:
+            event = await admin.rename_campaign(pool, campaign_id, (await request.json()).get("name", ""), user)
+        except admin.AdminError as e:
+            return admin_failed(e)
+        await bus.publish(event)  # open tables update their title and the GM's next turn
+        log.info("admin %s renamed world %s: %s", user, campaign_id, event["summary"])
+        return JSONResponse(event)
+
+    async def admin_delete_world(request: Request) -> Response:
+        user = require_admin(request)
+        campaign_id = int(request.path_params["campaign_id"])
+        pool, _ = await admin_backend()
+        try:
+            name = await admin.delete_campaign(pool, campaign_id, (await request.json()).get("confirm", ""))
+        except admin.AdminError as e:
+            return admin_failed(e)
+        # Tell anyone at the table, then clear the world's Redis state (conversation, feeds, lines).
+        await redis.xadd(stream_key(campaign_id), {"event": json.dumps({
+            "id": 0, "campaign_id": campaign_id, "type": "campaign_deleted", "actor": user,
+            "summary": f"The world {name} was deleted", "occurred_at": "", "data": {}})})
+        await asyncio.sleep(1)
+        keys = [k async for k in redis.scan_iter(f"lore:campaign:{campaign_id}:*")]
+        if keys:
+            await redis.delete(*keys)
+        log.info("admin %s deleted world %s (%s)", user, campaign_id, name)
+        return JSONResponse({"deleted": name})
+
+    async def admin_edit_character(request: Request) -> Response:
+        user = require_admin(request)
+        pool, _ = await admin_backend()
+        try:
+            event = await admin.update_character(
+                pool, int(request.path_params["character_id"]), await request.json(), user
+            )
+        except admin.AdminError as e:
+            return admin_failed(e)
+        await bus.publish(event)
+        log.info("admin %s: %s", user, event["summary"])
+        return JSONResponse(event)
+
+    async def admin_presence(request: Request) -> Response:
+        await presence.seen(require_admin(request), "admin")
+        pool, _ = await admin_backend()
+        names = {r["id"]: r["name"] for r in await pool.fetch("SELECT id, name FROM campaigns")}
+        people = await presence.everyone()
+        for p in people:
+            p["campaign"] = names.get(p["campaign_id"]) if p["campaign_id"] else None
+        return JSONResponse(people)
+
+    async def admin_tables(request: Request) -> Response:
+        """Every world's GM conversation: size, mode, last activity, and any turn in progress."""
+        require_admin(request)
+        pool, _ = await admin_backend()
+        names = {r["id"]: r["name"] for r in await pool.fetch("SELECT id, name FROM campaigns")}
+        tables = []
+        async for key in redis.scan_iter("lore:campaign:*:gm:messages"):
+            campaign_id = int(key.split(":")[2])
+            table = Table(redis, campaign_id)
+            raw, mode, lock = await redis.mget(table.messages, table.mode, table.lock)
+            ttl, lock_ttl = await redis.ttl(table.messages), await redis.ttl(table.lock)
+            tables.append({
+                "campaign_id": campaign_id,
+                "campaign": names.get(campaign_id, f"(deleted world {campaign_id})"),
+                "messages": len(json.loads(raw)) if raw else 0,
+                "bytes": len(raw.encode()) if raw else 0,
+                "mode": mode,
+                "idle_seconds": TRANSCRIPT_TTL - ttl if ttl > 0 else None,
+                "turn_running": bool(lock),
+                "lock_expires_in": lock_ttl if lock else None,
+            })
+        return JSONResponse(sorted(tables, key=lambda t: t["idle_seconds"] or 0))
+
+    async def admin_unlock_table(request: Request) -> Response:
+        user = require_admin(request)
+        table = Table(redis, int(request.path_params["campaign_id"]))
+        await redis.delete(table.lock)
+        log.info("admin %s cleared the turn lock for world %s", user, request.path_params["campaign_id"])
+        return JSONResponse({"unlocked": True})
+
+    async def admin_reset_table(request: Request) -> Response:
+        user = require_admin(request)
+        table = Table(redis, int(request.path_params["campaign_id"]))
+        await table.reset()
+        log.info("admin %s reset the GM conversation for world %s", user, request.path_params["campaign_id"])
+        return JSONResponse({"reset": True})
+
+    async def admin_usage(request: Request) -> Response:
+        require_admin(request)
+        days = max(1, min(int(request.query_params.get("days", "14")), 120))
+        return JSONResponse(await usage.summary(days))
 
     async def admin_overview(request: Request) -> Response:
         require_admin(request)
@@ -556,6 +679,15 @@ def create_app() -> Starlette:
             Route("/api/voice/ticket", voice_ticket, methods=["POST"]),
             WebSocketRoute("/ws/voice", voice_socket),
             Route("/api/admin/overview", admin_overview),
+            Route("/api/admin/worlds", admin_worlds),
+            Route("/api/admin/worlds/{campaign_id:int}/rename", admin_rename_world, methods=["POST"]),
+            Route("/api/admin/worlds/{campaign_id:int}/delete", admin_delete_world, methods=["POST"]),
+            Route("/api/admin/characters/{character_id:int}", admin_edit_character, methods=["POST"]),
+            Route("/api/admin/presence", admin_presence),
+            Route("/api/admin/tables", admin_tables),
+            Route("/api/admin/tables/{campaign_id:int}/unlock", admin_unlock_table, methods=["POST"]),
+            Route("/api/admin/tables/{campaign_id:int}/reset", admin_reset_table, methods=["POST"]),
+            Route("/api/admin/usage", admin_usage),
             Route("/api/admin/sql", admin_sql, methods=["POST"]),
             Route("/api/admin/vector", admin_vector, methods=["POST"]),
             Mount("/static", StaticFiles(directory=STATIC), name="static"),
