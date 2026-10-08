@@ -262,8 +262,11 @@ async function takeTurn(message) {
           gm.scrollIntoView({ block: "end" });
           setActivity("");
           if (state.mode === "speech") speaker.feed(ev.text);
-        } else if (ev.type === "tool") setActivity(TOOL_VERBS[ev.name] || "working");
-        else if (ev.type === "error") addMessage("error", ev.text);
+        } else if (ev.type === "tool") {
+          // Narration comes before record-keeping, so speak what's there without waiting.
+          if (state.mode === "speech") speaker.flush();
+          setActivity(TOOL_VERBS[ev.name] || "working");
+        } else if (ev.type === "error") addMessage("error", ev.text);
       });
   } catch (err) {
     addMessage("error", err.message);
@@ -544,8 +547,10 @@ const talk = {
       this.gm.scrollIntoView({ block: "end" });
       setActivity("");
       speaker.feed(ev.text);
-    } else if (ev.type === "tool") setActivity(TOOL_VERBS[ev.name] || "working");
-    else if (ev.type === "error") addMessage("error", ev.text);
+    } else if (ev.type === "tool") {
+      speaker.flush();  // narration comes before record-keeping: speak it now
+      setActivity(TOOL_VERBS[ev.name] || "working");
+    } else if (ev.type === "error") addMessage("error", ev.text);
     else if (ev.type === "done") {
       speaker.flush();
       this.finishReply();

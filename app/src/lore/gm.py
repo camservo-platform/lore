@@ -24,6 +24,11 @@ log = logging.getLogger(__name__)
 # Server-side retry on another model if a request is declined, and server-side
 # summarising of old turns when a long session nears the context limit.
 BETAS = ["compact-2026-01-12", "server-side-fallback-2026-07-01"]
+# Thinking blocks are bound to the exact system prompt, tools and history that produced
+# them. We keep all three append-only, but if anything drifts (say a tool's description
+# changes in a deploy), drop the stale blocks rather than failing the turn.
+BINDING_BETA = "thinking-binding-controls-2026-08-01"
+THINKING = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 MAX_ROUNDS = 16
 
 SYSTEM = """\
@@ -45,19 +50,33 @@ How you run the game:
   a mark that doesn't belong, a story that doesn't add up. Reveal more as players
   investigate, ask the right people or succeed on rolls; if they seem stuck, make the
   hints stronger rather than handing over the answer.
-- The game server is the truth for numbers. Read character sheets before relying on
-  them and change HP, items, gold, conditions, status and location only through its
-  tools. Use roll_dice for every uncertain outcome (pass the campaign and character so
-  the roll is logged) and narrate the result honestly, including failures.
+- The game server is the truth for numbers. Change HP, items, gold, conditions, status
+  and location only through its tools. Use roll_dice for every uncertain outcome (pass
+  the campaign and character so the roll is logged) and narrate the result honestly,
+  including failures.
+- Work in this order each turn, making independent tool calls together in a single
+  response rather than one at a time:
+  1. Gather what you need and roll any dice.
+  2. Apply the changes whose results you will describe: damage, healing, spending gold,
+     using up or losing items, conditions, status. Their results can differ from what
+     you expect (a character drops to 0 HP, can't afford something), so narrate from
+     what the tools return.
+  3. Narrate the outcome.
+  4. Only then do the record-keeping that can't change what you said: log_event,
+     add_lore, add_item for things found or given, move_character. The players are
+     already hearing your narration while this runs, so never add narration after it.
 - The lore server is the truth for the world. Search it before describing an
   established place, person, faction or past event, and record anything new you invent
   that should stay consistent (with add_lore). Record story beats with log_event.
-- At the start of a conversation, look at recent_events, the characters and the most
-  relevant lore to recap where things stand. If the speaking player has no character in
-  this campaign, help them create one (create_character with their username as player)
+- Each player message ends with the current table state: whether a session is open,
+  every character's HP, conditions, status and location, and the latest events. Trust it
+  instead of looking those up again; read a full sheet only when you need inventory or
+  attributes. At the start of a conversation, search the lore relevant to where things
+  stand so your recap is grounded. If the speaking player has no character in this
+  campaign, help them create one (create_character with their username as player)
   before play begins.
-- If a session is not open, start one when play begins; when the players stop for the
-  day, end it with a short recap.
+- If the table state says no session is open, start one when play begins; when the
+  players stop for the day, end it with a short recap.
 - Use plain generic fantasy terminology and your own invented names; never refer to
   commercial games, publishers or their trademarked rules, places or creatures. Give
   characters attributes that suit the world and the character rather than a standard
@@ -184,10 +203,12 @@ class GameMaster:
         self._effort = effort
 
     async def turn(
-        self, campaign: str, user: str, system: str, messages: list[dict[str, Any]]
+        self, campaign: str, user: str, system: str, messages: list[dict[str, Any]], model: str | None = None
     ) -> AsyncIterator[dict[str, Any]]:
         """Runs the GM until it hands control back to the players, appending to `messages`.
-        `system` must be the prompt the conversation started with.
+        `system` must be the prompt the conversation started with. `model` overrides the
+        default for this turn (e.g. a faster one for speech); switching models within a
+        conversation is fine, each model just ignores the other's thinking.
 
         Yields {"type": "text", "text"} deltas, {"type": "tool", "name"} as tools run, and
         finally {"type": "done", "text"} with the narration of this turn."""
@@ -196,7 +217,7 @@ class GameMaster:
             for _ in range(MAX_ROUNDS):
                 final = None
                 for attempt in range(3):
-                    round_ = _Round(self._request(system, messages), narration)
+                    round_ = _Round(self._request(model or self._model, system, messages), narration)
                     try:
                         async for event in round_:
                             yield event
@@ -241,11 +262,12 @@ class GameMaster:
             result = json.dumps(result)
         return {"type": "tool_result", "tool_use_id": block["id"], "content": result, "is_error": is_error}
 
-    def _request(self, system: str, messages: list[dict[str, Any]]):
+    def _request(self, model: str, system: str, messages: list[dict[str, Any]]):
         return self._client.beta.messages.stream(
-            model=self._model,
+            model=model,
             max_tokens=16000,
-            betas=BETAS,
+            betas=BETAS + [BINDING_BETA],
+            thinking=THINKING,
             fallbacks="default",
             context_management={"edits": [{"type": "compact_20260112"}]},
             cache_control={"type": "ephemeral"},

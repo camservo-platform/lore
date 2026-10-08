@@ -26,6 +26,7 @@ data:
   {{- end }}
   LLM_PROVIDER: {{ .Values.llm.provider | quote }}
   LLM_MODEL: {{ .Values.llm.model | quote }}
+  LLM_SPEECH_MODEL: {{ .Values.llm.speechModel | quote }}
   LLM_EFFORT: {{ .Values.llm.effort | quote }}
   LORE_ADMINS: {{ join "," .Values.web.admins | quote }}
   DEEPGRAM_STT_MODEL: {{ .Values.deepgram.sttModel | quote }}

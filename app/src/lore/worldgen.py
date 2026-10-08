@@ -115,7 +115,12 @@ async def forge(
         yield {"type": "error", "text": f"The LLM request failed: {e.message}"}
     except Exception as e:
         log.exception("world generation failed")
-        yield {"type": "error", "text": f"World generation failed: {e}"}
+        while isinstance(e, BaseExceptionGroup) and e.exceptions:
+            e = e.exceptions[0]
+        if isinstance(e, anthropic.APIStatusError):
+            yield {"type": "error", "text": f"The LLM request failed: {e.message}"}
+        else:
+            yield {"type": "error", "text": f"World generation failed: {e}"}
 
 
 class WorldGenError(Exception):

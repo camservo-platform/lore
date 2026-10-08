@@ -62,6 +62,7 @@ class WebSettings:
     mcp_servers: dict[str, str]
     llm_api_key: str
     llm_model: str
+    llm_speech_model: str
     llm_effort: str
     deepgram_api_key: str | None
     stt_model: str
@@ -81,6 +82,7 @@ class WebSettings:
             mcp_servers={"game": env["MCP_GAME_URL"], "lore": env["MCP_LORE_URL"]},
             llm_api_key=env["LLM_API_KEY"],
             llm_model=env.get("LLM_MODEL", "claude-opus-5-5"),
+            llm_speech_model=env.get("LLM_SPEECH_MODEL") or env.get("LLM_MODEL", "claude-opus-5-5"),
             llm_effort=env.get("LLM_EFFORT", "medium"),
             deepgram_api_key=env.get("DEEPGRAM_API_KEY") or None,
             stt_model=env.get("DEEPGRAM_STT_MODEL", "flux-general-en"),
@@ -143,6 +145,49 @@ def _complete_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     ):
         return messages[:-1]
     return messages
+
+
+def describe_error(e: BaseException) -> str:
+    """A message a player can act on: the innermost cause, with the API's own wording."""
+    while isinstance(e, BaseExceptionGroup) and e.exceptions:
+        e = e.exceptions[0]
+    if isinstance(e, anthropic.APIStatusError):
+        body = e.body if isinstance(e.body, dict) else {}
+        return f"The Game Master couldn't reach the model: {body.get('error', {}).get('message') or e.message}"
+    if isinstance(e, anthropic.APIConnectionError):
+        return "The Game Master couldn't reach the model (network error). Try again in a moment."
+    return f"Something went wrong: {e}"
+
+
+def format_table_state(characters: list[dict[str, Any]], sheets: list[dict[str, Any]],
+                       events: list[dict[str, Any]]) -> str:
+    """The table as the GM should see it at the start of a turn (saves it looking it up)."""
+    latest = events[-1] if events else None
+    session_open = bool(latest and latest.get("session_id") and latest["type"] != "session_ended")
+    lines = ["[Table state]", f"Session: {'open' if session_open else 'not open'}"]
+    by_name = {s["name"]: s for s in sheets}
+    if characters:
+        lines.append("Characters:")
+    for c in characters:
+        sheet = by_name.get(c["name"], {})
+        details = [f"{c['hp']}/{c['max_hp']} HP"]
+        if sheet.get("temp_hp"):
+            details.append(f"{sheet['temp_hp']} temporary HP")
+        if c["status"] != "alive":
+            details.append(c["status"])
+        details += sheet.get("conditions") or []
+        where = f"; at {c['location']}" if c["location"] else ""
+        owner = f"player: {c['player']}" if c["player"] else "NPC"
+        lines.append(f"- {c['name']} ({owner}): {', '.join(details)}{where}")
+    if not characters:
+        lines.append("Characters: none yet")
+    if events:
+        lines.append("Latest events:")
+        lines += [f"- {e['summary']}" for e in events]
+    # Repeated here, next to the decision, because it's easy to lose in a long system prompt.
+    lines.append("[Turn order: roll and apply what you'll describe first, then narrate, then record "
+                 "(log_event, add_lore, add_item, move_character) after the narration.]")
+    return "\n".join(lines)
 
 
 def sse(events: AsyncIterator[dict[str, Any]]) -> StreamingResponse:
@@ -241,6 +286,21 @@ def create_app() -> Starlette:
             await asyncio.sleep(0.5)
         return True
 
+    async def table_state(campaign: str, user: str) -> str | None:
+        try:
+            async with toolbox.session(user) as tools:
+                characters, events = await asyncio.gather(
+                    tools.call_json("list_characters", campaign=campaign),
+                    tools.call_json("recent_events", campaign=campaign, limit=6),
+                )
+                sheets = await asyncio.gather(*(
+                    tools.call_json("get_character", campaign=campaign, character=c["name"]) for c in characters
+                ))
+            return format_table_state(characters, list(sheets), events)
+        except Exception:
+            log.exception("couldn't read the table state; the GM will look it up itself")
+            return None
+
     async def play_turn(
         table: Table, turn_id: str, campaign: str, user: str, said: str, mode: str,
         emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None = None,
@@ -259,7 +319,8 @@ def create_app() -> Starlette:
             system, version = saved["system"] or system_prompt(campaign), saved["version"] or "unversioned"
         else:
             system, version = system_prompt(campaign), current
-        messages.append({"role": "user", "content": f"{user}: {text}"})
+        state = await table_state(campaign, user)
+        messages.append({"role": "user", "content": f"{user}: {text}" + (f"\n\n{state}" if state else "")})
         # Operator notes go in one appended system message: never edit what was sent.
         notes = []
         if version != current:
@@ -271,13 +332,14 @@ def create_app() -> Starlette:
             messages.append({"role": "system", "content": "\n\n".join(notes)})
         reply = ""
         try:
-            async for event in gm.turn(campaign, user, system, messages):
+            model = settings.llm_speech_model if mode == "speech" else settings.llm_model
+            async for event in gm.turn(campaign, user, system, messages, model=model):
                 if event["type"] == "done":
                     reply = event["text"]
                 await emit(event)
         except Exception as e:
             log.exception("turn failed")
-            await emit({"type": "error", "text": f"Something went wrong: {e}"})
+            await emit({"type": "error", "text": describe_error(e)})
         finally:
             await table.save(_complete_history(messages), mode, system, version)
             await redis.delete(table.lock)
