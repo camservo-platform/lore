@@ -81,6 +81,10 @@ How you run the game:
   asks for more (looking closer, questioning someone, searching) or when something truly
   important happens: arriving somewhere new, a major revelation, a dramatic turn in a
   fight.
+- End every narration by handing control to the players with a short prompt, such as
+  "What do you do?" In combat, say plainly what the attack or spell did (hit or miss,
+  the damage, who is hurt or down) and whose move it is next, so a player listening
+  without the screen always knows the outcome and that it's their turn.
 - Let the players discover the world's secrets themselves. Never recite lore wholesale
   or reveal hidden truths unprompted (an NPC's secret, which rumors are true, where a
   storyline is heading). Plant concrete hints instead: an odd detail, a nervous glance,
@@ -106,7 +110,8 @@ How you run the game:
      narrate call so the players hear the story while they run. End the turn there,
      without writing anything else.
 - Never mention tools, logs, notes, saving or the game server to the players. They only
-  hear the story.
+  hear the story. Keep calculations and working notes (modifiers, hit totals, who is
+  winning) in your thinking, never in text.
 - The lore server is the truth for the world. Search it before describing an
   established place, person, faction or past event, and record anything new you invent
   that should stay consistent (with add_lore). Record story beats with log_event.
@@ -357,6 +362,11 @@ class _Round:
         self._mute = mute  # keep this round's text out of the narration (see RECORD_TOOLS)
         self._new_block = False
         self._narrating: str | None = None  # text of a narrate call streamed so far
+        # Plain text is held until we know what it is: followed by a tool call in the same
+        # response it's working notes ("Hit for 4..."), at the end of the response it's
+        # narration. (Narrate calls stream straight away.)
+        self._held: list[str] = []
+        self._new_text_block = False
         self.final = None
 
     def __aiter__(self):
@@ -367,6 +377,9 @@ class _Round:
             async for event in stream:
                 if event.type == "content_block_start":
                     self._narrating = None
+                    if event.content_block.type == "tool_use" and self._held:
+                        log.info("dropped GM working notes before a tool call: %r", "".join(self._held)[:200])
+                        self._held = []
                     if event.content_block.type == "tool_use" and event.content_block.name == NARRATE:
                         self._narrating, self._new_block = "", True
                     elif event.content_block.type == "tool_use":
@@ -381,9 +394,15 @@ class _Round:
                         for out in self._say(delta):
                             yield out
                 elif event.type == "text" and event.text and not self._mute:
-                    for out in self._say(event.text):
-                        yield out
+                    if not self._held:
+                        self._new_text_block = self._new_block
+                    self._held.append(event.text)
             self.final = await stream.get_final_message()
+        if self._held:
+            self._new_block = self._new_text_block
+            for out in self._say("".join(self._held)):
+                yield out
+            self._held = []
 
     def _say(self, text: str):
         if self._new_block and "".join(self._narration).strip():
