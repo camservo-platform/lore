@@ -235,3 +235,6 @@ provided that you release the source of any modified version you distribute or r
 a network service, under the same license.
 
 Commercial licenses without the AGPL's obligations are available from the author.
+
+Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). Contributors sign a
+[Contributor License Agreement](CLA.md) once, via a comment on their first pull request.

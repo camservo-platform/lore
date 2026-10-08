@@ -1,0 +1,45 @@
+name: cla
+
+# Every pull request author must sign CLA.md once, by commenting the sign phrase on a PR.
+# Signatures are committed to the cla-signatures branch, which must stay unprotected so
+# the bot can push to it. The `cla` job is a required check on main.
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write # re-runs the PR's check after a contributor signs
+  contents: write # commits signatures to cla-signatures
+  pull-requests: write
+  statuses: write
+
+concurrency:
+  group: cla # serialize writes to the signatures file
+  cancel-in-progress: false
+
+jobs:
+  cla:
+    # Never checks out PR code, so pull_request_target's write token is safe here.
+    if: >-
+      github.event_name == 'pull_request_target' ||
+      (github.event.issue.pull_request &&
+        (github.event.comment.body == 'recheck' ||
+         github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+    runs-on: ubuntu-24.04
+    steps:
+      # v2.6.1, pinned by SHA: the upstream repo is archived, so this code is frozen.
+      - uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          path-to-document: https://github.com/camservo-platform/lore/blob/main/CLA.md
+          path-to-signatures: signatures/version1/cla.json
+          branch: cla-signatures
+          allowlist: camservo,dependabot[bot]
+          custom-notsigned-prcomment: >-
+            Thanks for contributing to Lore! Before this pull request can be merged, each
+            author needs to sign the [Contributor License Agreement](https://github.com/camservo-platform/lore/blob/main/CLA.md)
+            once. You keep the copyright in your work; the CLA lets the project be
+            relicensed later. To sign, post a comment with exactly the text below.
