@@ -267,6 +267,8 @@ function addMessage(kind, text, who, { aside = false } = {}) {
   else body.textContent = text;
   el.append(body);
   $("transcript").append(el);
+  const creator = $("creator");
+  if (creator) $("transcript").append(creator);  // the character picker stays at the bottom
   el.scrollIntoView({ block: "end" });
   return el;
 }
@@ -277,6 +279,8 @@ const TOOL_VERBS = {
   list_characters: "looking over the party", recent_events: "reviewing the chronicle", apply_damage: "applying damage",
   heal: "healing", add_item: "updating inventory", remove_item: "updating inventory", adjust_gold: "counting coin",
   create_character: "creating a character", log_event: "writing in the chronicle",
+  use_ability: "calling on an ability", recover: "letting the party recover", grant_ability: "granting an ability",
+  list_character_options: "looking over races and classes", choose_race_and_class: "updating a character",
 };
 
 function setActivity(text) {
@@ -290,10 +294,10 @@ function setBusy(busy) {
   $("send").disabled = busy;
 }
 
-async function takeTurn(message, { intro = false } = {}) {
+async function takeTurn(message, { intro = false, aside: asked } = {}) {
   if (state.busy || !state.campaign) return;
   setBusy(true);
-  const aside = state.aside && Boolean(message);  // an empty message asks for a recap: in the story
+  const aside = (asked ?? state.aside) && Boolean(message);  // an empty message asks for a recap: in the story
   if (message) addMessage("player", message, state.user, { aside });
   const gm = addMessage("gm", "", undefined, { aside });
   gm.classList.add("streaming");
@@ -377,6 +381,7 @@ async function refreshState() {
     const data = await (await api(`/api/campaigns/${state.campaign.id}/state?name=${encodeURIComponent(state.campaign.name)}`)).json();
     renderParty(data.characters);
     renderDiceCharacters(data.characters);
+    updateCreator(data.characters);
     const log = $("log");
     log.innerHTML = "";
     data.events.slice().reverse().forEach((ev) => log.append(eventItem(ev, false)));
@@ -415,6 +420,7 @@ function renderParty(characters) {
             <div><dt>Gold</dt><dd>${c.gold}</dd></div>
             ${attributes.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd></div>`).join("")}
           </dl>
+          ${abilitiesHtml(c)}
           ${c.conditions.length ? `<div class="conditions">${c.conditions.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}
           <div class="inventory-title">Inventory</div>
           <ul class="inventory">${c.inventory.length
@@ -424,8 +430,153 @@ function renderParty(characters) {
         </div>
       </details>`;
     li.querySelector("details").addEventListener("toggle", (e) => state.sheets.set(c.name, e.target.open));
+    li.querySelectorAll("[data-ability]").forEach((b) => b.addEventListener("click", () => showAbility(c, c.abilities[+b.dataset.ability])));
     party.append(li);
   }
+}
+
+// ---------- abilities ----------------------------------------------------------------
+
+const REFRESH_TEXT = { recovery: "after a proper rest", session: "at the start of each session" };
+
+function abilitySpent(c, a) {
+  return a.max_uses !== null ? a.uses_left < 1 : Boolean(a.cost) && c.pool < a.cost;
+}
+
+function abilityLimit(c, a) {
+  if (a.max_uses !== null) return `<span class="pips" aria-label="${a.uses_left} of ${a.max_uses} left">${"●".repeat(a.uses_left)}${"○".repeat(a.max_uses - a.uses_left)}</span>`;
+  if (a.cost) return `${a.cost} ${escapeHtml(c.pool_name)}`;
+  return "unlimited";
+}
+
+function abilitiesHtml(c) {
+  if (!c.abilities?.length) return "";
+  const pool = c.pool_max ? `<div class="pool"><span>${escapeHtml(c.pool_name)} ${c.pool}/${c.pool_max}</span>
+      <div class="bar"><div style="width:${(100 * c.pool) / c.pool_max}%"></div></div></div>` : "";
+  return `<div class="inventory-title">Abilities</div>${pool}
+    <ul class="abilities">${c.abilities.map((a, i) => `<li class="${abilitySpent(c, a) ? "spent" : ""}">
+      <button type="button" data-ability="${i}" title="${escapeHtml(a.summary)}">
+        <span class="ability-name">${escapeHtml(a.name)}</span><span class="limit">${abilityLimit(c, a)}</span>
+      </button></li>`).join("")}</ul>`;
+}
+
+function showAbility(c, a) {
+  $("ability-name").textContent = a.name;
+  $("ability-source").textContent = `${c.name} · from ${a.source.replace(/^(race|class): /, "their $1, ")}${a.level > 1 ? ` · level ${a.level}` : ""}`;
+  $("ability-description").textContent = a.description || a.summary;
+  $("ability-effect").textContent = a.effect;
+  let limits;
+  if (a.max_uses !== null) limits = `${a.uses_left} of ${a.max_uses} uses left. Uses come back ${REFRESH_TEXT[a.refresh]}.`;
+  else if (a.cost) limits = `Costs ${a.cost} ${c.pool_name}. ${c.name} has ${c.pool} of ${c.pool_max}, refilled ${REFRESH_TEXT[c.pool_refresh]}.`;
+  else limits = "Unlimited: use it whenever it makes sense.";
+  if (abilitySpent(c, a)) limits += " Spent for now.";
+  $("ability-limits").textContent = limits;
+  $("ability-dialog").showModal();
+}
+
+// ---------- making a character -------------------------------------------------------
+
+// A player with no character here (or only one made before races and classes gave
+// abilities) gets a picker at the bottom of the chat: the world's races and classes,
+// what they mean and what abilities they give. They can also just tell the GM.
+async function updateCreator(characters) {
+  const mine = characters.filter((c) => c.player === state.user);
+  const chosen = (c) => c.abilities.some((a) => /^(race|class): /.test(a.source));
+  const existing = mine.length && !mine.some(chosen) ? mine[0].name : null;
+  const needed = !mine.length || existing;
+  const old = $("creator");
+  const key = `${state.campaign.id}:${existing || ""}`;
+  if (!needed || state.creatorDismissed === key) { old?.remove(); return; }
+  if (old?.dataset.key === key || state.creatorLoading === key) return;  // keep what they've picked so far
+  state.creatorLoading = key;
+  let options;
+  try {
+    options = await (await api(`/api/campaigns/${state.campaign.id}/options?name=${encodeURIComponent(state.campaign.name)}`)).json();
+  } catch (e) { toast(`Couldn't load races and classes: ${e.message}`); return; }
+  finally { state.creatorLoading = null; }
+  if (`${state.campaign?.id}:${existing || ""}` !== key) return;  // left the table meanwhile
+  $("creator")?.remove();
+  $("transcript").append(creatorCard(options, existing, key));
+}
+
+function optionLimits(o) {
+  if (o.kind === "race") return "Race abilities come back after a proper rest.";
+  const r = o.resource;
+  return r.kind === "pool"
+    ? `Abilities spend ${r.name}: ${r.base} points at level 1, +${r.per_level} each level, refilled ${REFRESH_TEXT[r.refresh]}.`
+    : `Each ability has its own uses, which come back ${REFRESH_TEXT[r.refresh]}.`;
+}
+
+function optionAbilityLimit(o, a) {
+  if (a.cost !== null && a.cost !== undefined) return a.cost ? `${a.cost} ${o.resource.name}` : "free";
+  return a.uses ? `${a.uses}×` : "unlimited";
+}
+
+function optionDetail(o) {
+  return `<p>${escapeHtml(o.description)}</p><p class="hint">${escapeHtml(optionLimits(o))}</p>
+    <ul>${o.abilities.map((a) => `<li><strong>${escapeHtml(a.name)}</strong>${a.level > 1 ? ` (level ${a.level})` : ""}:
+      ${escapeHtml(a.summary)} <span class="limit">${escapeHtml(optionAbilityLimit(o, a))}</span></li>`).join("")}</ul>`;
+}
+
+function creatorCard(options, existing, key) {
+  const el = document.createElement("div");
+  el.className = "creator";
+  el.id = "creator";
+  el.dataset.key = key;
+  const group = (kind, label, list) => `<fieldset data-kind="${kind}"><legend>${label}</legend>
+    <div class="choices">${list.map((o, i) => `<button type="button" class="choice" aria-pressed="false" data-index="${i}">
+      <span class="choice-name">${escapeHtml(o.name)}${o.world ? "<small>this world only</small>" : ""}</span>
+      <span class="choice-summary">${escapeHtml(o.summary)}</span></button>`).join("")}</div>
+    <div class="choice-detail" hidden></div></fieldset>`;
+  el.innerHTML = `
+    <h3>${existing ? `Choose a race and class for ${escapeHtml(existing)}` : "Make your character"}</h3>
+    <p class="hint">Your race and class decide what your character can do. Click one to read about it and its
+      abilities. You can also just tell the Game Master.</p>
+    ${existing ? "" : '<div class="row"><input id="creator-name" maxlength="40" placeholder="Your character\'s name" autocomplete="off"></div>'}
+    ${group("race", "Race", options.races)}
+    ${group("class", "Class", options.classes)}
+    <p class="error" id="creator-error" hidden></p>
+    <div class="row end">
+      <button type="button" class="small-button" data-dismiss>Not now</button>
+      <button type="button" class="primary" id="creator-go" disabled>${existing ? "Choose" : "Create character"}</button>
+    </div>`;
+  const picked = { race: null, class: null };
+  const lists = { race: options.races, class: options.classes };
+  const ready = () => {
+    const named = existing || el.querySelector("#creator-name").value.trim();
+    el.querySelector("#creator-go").disabled = !(named && picked.race && picked.class);
+  };
+  el.querySelectorAll("fieldset").forEach((fs) => fs.querySelectorAll(".choice").forEach((b) => b.addEventListener("click", () => {
+    const kind = fs.dataset.kind;
+    picked[kind] = lists[kind][+b.dataset.index];
+    fs.querySelectorAll(".choice").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+    const detail = fs.querySelector(".choice-detail");
+    detail.innerHTML = optionDetail(picked[kind]);
+    detail.hidden = false;
+    ready();
+  })));
+  el.querySelector("#creator-name")?.addEventListener("input", ready);
+  el.querySelector("[data-dismiss]").addEventListener("click", () => { state.creatorDismissed = key; el.remove(); });
+  el.querySelector("#creator-go").addEventListener("click", async (e) => {
+    const name = existing || el.querySelector("#creator-name").value.trim();
+    e.target.disabled = true;
+    try {
+      const sheet = await adminPost(`/api/campaigns/${state.campaign.id}/characters`, {
+        campaign: state.campaign.name, name, existing, race: picked.race.name, class: picked.class.name,
+      });
+      el.remove();
+      await refreshState();
+      // Tell the GM, so play can begin (after any reply still running).
+      for (let i = 0; state.busy && i < 120; i++) await sleep(500);
+      const what = `${/^[aeiou]/i.test(sheet.race) ? "an" : "a"} ${sheet.race} ${sheet.class}`;
+      takeTurn(existing ? `I've chosen for ${sheet.name} to be ${what}.` : `I'm ${sheet.name}, ${what}.`, { aside: false });
+    } catch (err) {
+      el.querySelector("#creator-error").textContent = err.message;
+      el.querySelector("#creator-error").hidden = false;
+      ready();
+    }
+  });
+  return el;
 }
 
 // ---------- dice -------------------------------------------------------------------

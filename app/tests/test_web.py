@@ -155,3 +155,14 @@ async def test_health_summarises_recent_errors(redis):
     assert summary["last_hour"] == {"billing": 2}
     assert summary["last_day"] == {"billing": 2, "server": 1}
     assert summary["last"]["kind"] == "billing"
+
+
+def test_table_state_shows_identity_pool_and_uses_left():
+    from lore.web.app import format_table_state
+    characters = [{"name": "Sela", "player": "alice", "hp": 9, "max_hp": 9, "status": "alive", "location": ""}]
+    sheets = [{"name": "Sela", "temp_hp": 0, "conditions": [], "race": "Dwarf", "class": "Arcanist",
+               "pool_name": "Aether", "pool": 3, "pool_max": 4,
+               "abilities": [{"name": "Spark Lance", "max_uses": None, "uses_left": None},
+                             {"name": "Stoneblood", "max_uses": 1, "uses_left": 0}]}]
+    state = format_table_state(characters, sheets, [])
+    assert "- Sela (player: alice, Dwarf Arcanist): 9/9 HP, Aether 3/4, uses left: Stoneblood 0/1" in state

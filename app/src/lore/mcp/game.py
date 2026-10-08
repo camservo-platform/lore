@@ -13,15 +13,17 @@ import asyncpg
 from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
-from lore import events
+from lore import catalog, events
 from lore.mcp.common import actor, campaign_id, default_lifespan, run, state
 
 PATH = "/mcp/game"
 
 CHARACTER_COLUMNS = (
-    "c.id, c.name, c.race, c.class, c.level, c.hp, c.max_hp, c.temp_hp, c.defense, c.attributes,"
-    " c.conditions, c.gold, c.location, c.status, p.username AS player"
+    "c.id, c.campaign_id, c.name, c.race, c.class, c.level, c.hp, c.max_hp, c.temp_hp, c.defense, c.attributes,"
+    " c.conditions, c.gold, c.location, c.status, c.pool_name, c.pool_max, c.pool, c.pool_refresh,"
+    " p.username AS player"
 )
+ABILITY_COLUMNS = "name, source, summary, description, effect, level, max_uses, uses_left, cost, refresh"
 
 INSTRUCTIONS = """\
 Authoritative game state for a tabletop role-playing campaign. Never track HP, inventory, gold,
@@ -29,6 +31,9 @@ conditions or location in your head: read them here and change them only through
 these tools, which also write the campaign's event log. Use log_event for story
 beats that change no numbers (an NPC met, a quest accepted, a door opened).
 Use roll_dice for every random outcome; never invent a roll.
+Player characters pick a race and class from list_character_options; these give their
+abilities. Call use_ability whenever a character uses a limited ability (it refuses if
+none are left) and recover when the party properly rests.
 Names are matched case-insensitively."""
 
 
@@ -46,8 +51,52 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
             raise ToolError(f"No character named {name!r} in this campaign. Use list_characters.")
         return dict(row)
 
+    async def options(conn: asyncpg.Connection, cid: int) -> list[dict[str, Any]]:
+        """The core races and classes plus this world's own."""
+        themes = {r["key"]: r["theme"] for r in await conn.fetch(
+            "SELECT key, theme FROM world_themes WHERE campaign_id = $1", cid)}
+        rows = await conn.fetch("SELECT option FROM world_options WHERE campaign_id = $1 ORDER BY id", cid)
+        return ([catalog.apply_theme(o, themes.get(o["key"])) for o in catalog.core()]
+                + [r["option"] | {"world": True} for r in rows])
+
+    async def seed_abilities(conn: asyncpg.Connection, char_id: int, option: dict[str, Any], level: int) -> list[str]:
+        """Gives a character the option's abilities up to `level` (ones it has are kept); returns new names."""
+        added = []
+        for a in catalog.abilities_for(option, level):
+            name = await conn.fetchval(
+                """
+                INSERT INTO character_abilities (character_id, name, source, summary, description, effect, level,
+                                                 max_uses, uses_left, cost, refresh)
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)
+                ON CONFLICT (character_id, (lower(name))) DO NOTHING RETURNING name
+                """,
+                char_id, a["name"], a["source"], a["summary"], a["description"], a["effect"], a["level"],
+                a["max_uses"], a["cost"], a["refresh"],
+            )
+            if name:
+                added.append(name)
+        return added
+
+    async def apply_class_pool(conn: asyncpg.Connection, char_id: int, cls: dict[str, Any], level: int) -> None:
+        """Sets the class's pool for `level`, keeping points already spent spent."""
+        size = catalog.pool_max(cls, level)
+        resource = cls["resource"]
+        await conn.execute(
+            """
+            UPDATE characters SET pool_name = $2, pool = GREATEST(0, LEAST($3, pool + ($3 - pool_max))), pool_max = $3,
+                pool_refresh = $4 WHERE id = $1
+            """,
+            char_id, resource.get("name", "") if size else "", size, resource["refresh"],
+        )
+
     async def sheet(conn: asyncpg.Connection, cid: int, name: str) -> dict[str, Any]:
         character = await load_character(conn, cid, name)
+        character["abilities"] = [
+            dict(r) for r in await conn.fetch(
+                f"SELECT {ABILITY_COLUMNS} FROM character_abilities WHERE character_id = $1 ORDER BY level, id",
+                character["id"],
+            )
+        ]
         character["inventory"] = [
             dict(r)
             for r in await conn.fetch(
@@ -124,8 +173,21 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
                 )
             except asyncpg.UniqueViolationError:
                 raise ToolError("A session is already open for this campaign; end_session first.") from None
+            # Abilities and pools that come back each session do so now.
+            restored = await conn.execute(
+                "UPDATE character_abilities a SET uses_left = max_uses FROM characters c"
+                " WHERE a.character_id = c.id AND c.campaign_id = $1 AND a.refresh = 'session'"
+                " AND a.max_uses IS NOT NULL AND a.uses_left < a.max_uses",
+                cid,
+            )
+            refilled = await conn.execute(
+                "UPDATE characters SET pool = pool_max"
+                " WHERE campaign_id = $1 AND pool_refresh = 'session' AND pool < pool_max",
+                cid,
+            )
             event = await events.record(
-                conn, campaign_id=cid, actor=actor(ctx), type="session_started", summary="Session started"
+                conn, campaign_id=cid, actor=actor(ctx), type="session_started", summary="Session started",
+                data={"abilities_restored": int(restored.split()[-1]), "pools_refilled": int(refilled.split()[-1])},
             )
         await st.bus.publish(event)
         return {"session_id": row["id"], "started_at": row["started_at"].isoformat()}
@@ -172,25 +234,50 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
     async def create_character(
         campaign: str,
         name: str,
-        max_hp: int,
         ctx: Context,
         race: str = "",
         character_class: str = "",
+        max_hp: int | None = None,
         level: int = 1,
-        defense: int = 10,
+        defense: int | None = None,
         attributes: dict[str, int] | None = None,
         gold: int = 0,
         location: str = "",
         player: str | None = None,
     ) -> dict[str, Any]:
         """Creates a character at full HP. `player` is the owning user's username; omit it for NPCs.
+        A player character needs a race and class from list_character_options: they set its
+        abilities and, unless given, its max HP, defense and attributes. NPCs may use any race
+        and class text (catalog ones also get their abilities) but then need max_hp.
         `defense` is how hard the character is to hit; `attributes` maps stat names to scores
         (e.g. {"strength": 12, "agility": 14})."""
-        if max_hp < 1:
-            raise ToolError("max_hp must be at least 1.")
         st = state(ctx)
         async with st.pool.acquire() as conn, conn.transaction():
             cid = await campaign_id(conn, campaign)
+            available = await options(conn, cid)
+            race_option = catalog.find(available, "race", race) if race else None
+            class_option = catalog.find(available, "class", character_class) if character_class else None
+            if player and not (race_option and class_option):
+                raise ToolError(
+                    "A player character needs a race and a class from the list. Races: "
+                    + ", ".join(o["name"] for o in available if o["kind"] == "race") + ". Classes: "
+                    + ", ".join(o["name"] for o in available if o["kind"] == "class") + "."
+                )
+            if race_option:
+                race = race_option["name"]
+            if class_option:
+                character_class = class_option["name"]
+                if max_hp is None:
+                    max_hp = class_option["hp"] + (race_option["hp"] if race_option else 0)
+                if defense is None:
+                    defense = class_option["defense"]
+                if attributes is None:
+                    attributes = dict(class_option["attributes"])
+                    for stat, bonus in (race_option or {}).get("attributes", {}).items():
+                        attributes[stat] = attributes.get(stat, 10) + bonus
+            if max_hp is None or max_hp < 1:
+                raise ToolError("max_hp must be at least 1.")
+            defense = 10 if defense is None else defense
             player_id = None
             if player:
                 player_id = await conn.fetchval(
@@ -212,6 +299,11 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
                 raise ToolError(f"A character named {name!r} already exists in this campaign.") from None
             except asyncpg.CheckViolationError as e:
                 raise ToolError(f"Invalid character: {e.constraint_name}") from None
+            for option in (race_option, class_option):
+                if option:
+                    await seed_abilities(conn, char_id, option, level)
+            if class_option:
+                await apply_class_pool(conn, char_id, class_option, level)
             kind = f"{player}'s character" if player else "NPC"
             event = await events.record(
                 conn, campaign_id=cid, character_id=char_id, actor=actor(ctx), type="character_created",
@@ -226,6 +318,206 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
         """Returns a character's full sheet including inventory."""
         async with state(ctx).pool.acquire() as conn:
             return await sheet(conn, await campaign_id(conn, campaign), character)
+
+    # --- races, classes and abilities -----------------------------------------------
+
+    @server.tool()
+    async def list_character_options(campaign: str, ctx: Context) -> dict[str, Any]:
+        """The races and classes players can pick from in this campaign, with what each means and the
+        abilities it gives (`world: true` marks ones this world added). Each class decides how its
+        abilities are limited: its own uses per ability, or a shared pool of points with a cost per
+        ability; and whether they come back on recovery or at the start of each session."""
+        async with state(ctx).pool.acquire() as conn:
+            available = await options(conn, await campaign_id(conn, campaign))
+        return {"races": [o for o in available if o["kind"] == "race"],
+                "classes": [o for o in available if o["kind"] == "class"]}
+
+    @server.tool()
+    async def add_world_option(campaign: str, option: dict[str, Any], ctx: Context) -> dict[str, Any]:
+        """Adds a race or class of this world's own, in the catalog's shape (see list_character_options)."""
+        try:
+            option = catalog.validate(option)
+        except catalog.CatalogError as e:
+            raise ToolError(f"Invalid option: {e}") from None
+        st = state(ctx)
+        async with st.pool.acquire() as conn, conn.transaction():
+            cid = await campaign_id(conn, campaign)
+            if catalog.find(await options(conn, cid), option["kind"], option["name"]):
+                raise ToolError(f"There's already a {option['kind']} called {option['name']}.")
+            await conn.execute(
+                "INSERT INTO world_options (campaign_id, kind, name, option) VALUES ($1, $2, $3, $4)",
+                cid, option["kind"], option["name"], option,
+            )
+            event = await events.record(
+                conn, campaign_id=cid, actor=actor(ctx), type="world_option_added",
+                summary=f"New {option['kind']} in this world: {option['name']}", data={"name": option["name"]},
+            )
+        await st.bus.publish(event)
+        return option
+
+    @server.tool()
+    async def theme_core_options(campaign: str, themes: list[dict[str, Any]], ctx: Context) -> dict[str, Any]:
+        """Renames and re-describes the core races and classes to fit this world, keeping their
+        mechanics. Each theme: {key, name, summary, description, pool_name?, abilities: [{key, name,
+        summary, description, effect}]} with keys from list_character_options. An ability effect that
+        changes any dice or numbers keeps its core wording."""
+        st = state(ctx)
+        keys = {o["key"] for o in catalog.core()}
+        themes = [t for t in themes if isinstance(t, dict) and t.get("key") in keys]
+        async with st.pool.acquire() as conn, conn.transaction():
+            cid = await campaign_id(conn, campaign)
+            for t in themes:
+                await conn.execute(
+                    "INSERT INTO world_themes (campaign_id, key, theme) VALUES ($1, $2, $3)"
+                    " ON CONFLICT (campaign_id, key) DO UPDATE SET theme = EXCLUDED.theme",
+                    cid, t["key"], t,
+                )
+            try:
+                catalog.check_unique(await options(conn, cid))
+            except catalog.CatalogError as e:
+                raise ToolError(f"Those names clash: {e}") from None
+            event = await events.record(
+                conn, campaign_id=cid, actor=actor(ctx), type="world_options_themed",
+                summary="Races and classes renamed to fit the world", data={"themed": [t["key"] for t in themes]},
+            )
+        await st.bus.publish(event)
+        return {"themed": len(themes)}
+
+    @server.tool()
+    async def choose_race_and_class(
+        campaign: str, character: str, race: str, character_class: str, ctx: Context
+    ) -> dict[str, Any]:
+        """For a character made before races and classes gave abilities: sets them from
+        list_character_options and grants their abilities (HP, defense and attributes stay)."""
+        st = state(ctx)
+        async with st.pool.acquire() as conn:
+            available = await options(conn, await campaign_id(conn, campaign))
+        race_option = catalog.find(available, "race", race)
+        class_option = catalog.find(available, "class", character_class)
+        if not (race_option and class_option):
+            raise ToolError("Pick a race and a class from list_character_options.")
+
+        async def mutate(conn, c):
+            chosen = await conn.fetchval(
+                "SELECT count(*) FROM character_abilities WHERE character_id = $1"
+                " AND (source LIKE 'race: %' OR source LIKE 'class: %')", c["id"],
+            )
+            if chosen:
+                raise ToolError(f"{c['name']} already has a race and class.")
+            await conn.execute("UPDATE characters SET race = $2, class = $3 WHERE id = $1",
+                               c["id"], race_option["name"], class_option["name"])
+            for option in (race_option, class_option):
+                await seed_abilities(conn, c["id"], option, c["level"])
+            await apply_class_pool(conn, c["id"], class_option, c["level"])
+            return "character_updated", f"{c['name']} is a {race_option['name']} {class_option['name']}", {
+                "race": race_option["name"], "class": class_option["name"]}
+
+        return await change(ctx, campaign, character, mutate)
+
+    @server.tool()
+    async def use_ability(
+        campaign: str, character: str, ability: str, ctx: Context, target: str = ""
+    ) -> dict[str, Any]:
+        """Spends one use of an ability (or its cost from the character's pool) before you narrate its
+        effect. Fails if none are left: then the character can't use it until their uses come back.
+        Unlimited abilities are logged too. `target` is who or what it's used on, if anyone."""
+
+        async def mutate(conn, c):
+            row = await conn.fetchrow(
+                f"SELECT id, {ABILITY_COLUMNS} FROM character_abilities WHERE character_id = $1"
+                " AND lower(name) = lower($2)", c["id"], ability,
+            )
+            if row is None:
+                known = await conn.fetch(
+                    "SELECT name FROM character_abilities WHERE character_id = $1 ORDER BY level, id", c["id"])
+                raise ToolError(f"{c['name']} has no ability called {ability!r}. They have: "
+                                + (", ".join(r["name"] for r in known) or "none") + ".")
+            if c["status"] != "alive":
+                raise ToolError(f"{c['name']} is {c['status']} and can't use abilities.")
+            name, when = row["name"], "on recovery" if row["refresh"] == "recovery" else "next session"
+            data = {"ability": name, "target": target}
+            if row["max_uses"] is not None:
+                if row["uses_left"] < 1:
+                    raise ToolError(f"{c['name']} has no uses of {name} left; they come back {when}.")
+                await conn.execute("UPDATE character_abilities SET uses_left = uses_left - 1 WHERE id = $1",
+                                   row["id"])
+                data["uses_left"] = row["uses_left"] - 1
+                left = f" ({data['uses_left']}/{row['max_uses']} left)"
+            elif row["cost"]:
+                if c["pool"] < row["cost"]:
+                    refills = "on recovery" if c["pool_refresh"] == "recovery" else "next session"
+                    raise ToolError(f"{name} costs {row['cost']} {c['pool_name']} and {c['name']} has "
+                                    f"{c['pool']}; it fills again {refills}.")
+                await conn.execute("UPDATE characters SET pool = pool - $2 WHERE id = $1", c["id"], row["cost"])
+                data["pool_left"] = c["pool"] - row["cost"]
+                left = f" ({data['pool_left']}/{c['pool_max']} {c['pool_name']} left)"
+            else:
+                left = ""
+            on = f" on {target}" if target else ""
+            return "ability_used", f"{c['name']} used {name}{on}{left}", data
+
+        return await change(ctx, campaign, character, mutate)
+
+    @server.tool()
+    async def recover(
+        campaign: str, reason: str, ctx: Context, characters: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        """After a proper rest (a safe night's sleep, a real camp; not a pause mid-danger): restores
+        abilities and pools that come back on recovery, for the named characters or, if none are given,
+        every living character in the campaign. Doesn't heal HP; use heal for that."""
+        if characters is None:
+            async with state(ctx).pool.acquire() as conn:
+                cid = await campaign_id(conn, campaign)
+                characters = [r["name"] for r in await conn.fetch(
+                    "SELECT name FROM characters WHERE campaign_id = $1 AND status <> 'dead' ORDER BY name", cid)]
+
+        async def mutate(conn, c):
+            restored = await conn.execute(
+                "UPDATE character_abilities SET uses_left = max_uses"
+                " WHERE character_id = $1 AND refresh = 'recovery' AND max_uses IS NOT NULL AND uses_left < max_uses",
+                c["id"],
+            )
+            pool = c["pool_max"] if c["pool_refresh"] == "recovery" else c["pool"]
+            await conn.execute("UPDATE characters SET pool = $2 WHERE id = $1", c["id"], pool)
+            return "recovered", f"{c['name']} recovered ({reason})", {
+                "reason": reason, "abilities_restored": int(restored.split()[-1]), "pool": pool}
+
+        return [await change(ctx, campaign, name, mutate) for name in characters]
+
+    @server.tool()
+    async def grant_ability(
+        campaign: str, character: str, name: str, summary: str, effect: str, source: str, ctx: Context,
+        description: str = "", uses: int | None = None, cost: int | None = None, refresh: str = "recovery",
+    ) -> dict[str, Any]:
+        """Gives a character a new ability from the story (a relic, a teacher, a boon). Limit it with
+        `uses` (comes back per `refresh`: recovery or session) or a `cost` from their pool; give
+        neither for an unlimited one. `source` says where it came from."""
+        if refresh not in catalog.REFRESHES:
+            raise ToolError("refresh must be recovery or session.")
+        if uses is not None and cost is not None:
+            raise ToolError("Give uses or cost, not both.")
+        if uses is not None and uses < 1:
+            raise ToolError("uses must be at least 1 (or omit it for an unlimited ability).")
+
+        async def mutate(conn, c):
+            if cost is not None and not c["pool_max"]:
+                raise ToolError(f"{c['name']} has no pool to pay a cost from; give uses instead.")
+            try:
+                await conn.execute(
+                    """
+                    INSERT INTO character_abilities (character_id, name, source, summary, description, effect,
+                                                     level, max_uses, uses_left, cost, refresh)
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $8, $9, $10)
+                    """,
+                    c["id"], name, source, summary, description or summary, effect, c["level"], uses, cost, refresh,
+                )
+            except asyncpg.UniqueViolationError:
+                raise ToolError(f"{c['name']} already has an ability called {name}.") from None
+            except asyncpg.CheckViolationError as e:
+                raise ToolError(f"Invalid ability: {e.constraint_name}") from None
+            return "ability_gained", f"{c['name']} gained {name} ({source})", {"ability": name, "source": source}
+
+        return await change(ctx, campaign, character, mutate)
 
     @server.tool()
     async def list_characters(campaign: str, ctx: Context, location: str | None = None) -> list[dict[str, Any]]:
@@ -272,7 +564,22 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
                 )
             except asyncpg.CheckViolationError as e:
                 raise ToolError(f"Invalid value: {e.constraint_name}") from None
-            return "character_updated", f"{c['name']}: {reason}", changes
+            data, summary = dict(changes), f"{c['name']}: {reason}"
+            if level is not None and level != c["level"]:
+                # A new level can unlock abilities and grow the class's pool.
+                available = await options(conn, c["campaign_id"])
+                race_option = catalog.find(available, "race", c["race"]) if c["race"] else None
+                class_option = catalog.find(available, "class", c["class"]) if c["class"] else None
+                unlocked = []
+                for option in (race_option, class_option):
+                    if option:
+                        unlocked += await seed_abilities(conn, c["id"], option, level)
+                if class_option:
+                    await apply_class_pool(conn, c["id"], class_option, level)
+                if unlocked:
+                    data["abilities_unlocked"] = unlocked
+                    summary += f" (new: {', '.join(unlocked)})"
+            return "character_updated", summary, data
 
         return await change(ctx, campaign, character, mutate)
 

@@ -29,6 +29,7 @@ app/                    Python package `lore` (one image for every process)
 │   ├── migrations/     SQL schema, applied in order by `python -m lore.migrate`
 │   ├── mcp/game.py     MCP server: campaigns, characters, HP, inventory, dice, sessions, event log
 │   ├── mcp/lore.py     MCP server: world knowledge with semantic search
+│   ├── catalog.py      core races and classes, their abilities and limits, per-world theming
 │   ├── gm.py           the Game Master: Claude conversation using the MCP tools
 │   ├── worldgen.py     new-world generation
 │   ├── voice.py        Deepgram STT/TTS
@@ -165,7 +166,9 @@ transaction and then publishes it to Redis.
 |---|---|
 | `list_campaigns`, `create_campaign` | campaigns |
 | `start_session`, `end_session` | play sessions; events attach to the open one |
-| `create_character`, `get_character`, `list_characters`, `update_character` | sheets (PCs have a `player`, NPCs don't) |
+| `create_character`, `get_character`, `list_characters`, `update_character` | sheets (PCs have a `player` and must pick a race and class; NPCs don't); a level change unlocks abilities |
+| `list_character_options`, `theme_core_options`, `add_world_option`, `choose_race_and_class` | races and classes: the core set as this world names it, plus its own |
+| `use_ability`, `recover`, `grant_ability` | abilities: spend a use or pool points (refused when spent), restore after a proper rest, grant from the story |
 | `apply_damage`, `heal`, `grant_temp_hp`, `set_status` | HP with temporary HP; unconscious at 0, or dead if the overflow reaches max HP |
 | `add_condition`, `remove_condition` | conditions |
 | `add_item`, `remove_item`, `adjust_gold` | inventory (stacking, no overdraw) and gold |
@@ -185,8 +188,22 @@ Open `https://<host>/` and sign in.
 
 - **Your worlds** lists existing campaigns; **Forge a new world** takes an optional theme
   and name (leave both blank and the Game Master invents an original world), has Claude
-  write the setting, an opening scene and 12-16 linked lore entries, records them through
-  the MCP servers, and drops you into the first scene (about a minute).
+  write the setting, an opening scene and 12-16 linked lore entries, names the core races
+  and classes in the world's own terms (a warrior in one world is a gunner in another)
+  and adds one or two of its own, records it all through the MCP servers, and drops you
+  into the first scene (about a minute).
+- **Making a character**: a player with no character at a table gets a picker at the
+  bottom of the chat: a name, a race and a class, each with what it means and the
+  abilities it gives (players can also just tell the GM). Race and class set HP,
+  defense, attributes and abilities. A character made before races and classes gave
+  abilities gets the same picker to choose them (its HP and stats stay).
+- **Abilities**: the core set is five races and six classes, the same mechanics in every
+  world (`lore/catalog.py`). Each class decides how its abilities are limited: either
+  each has its own uses (shown as pips), or they share a pool of points (Aether, Grit,
+  ...) and each has a cost; and whether they come back when the GM calls a proper rest
+  (`recover`) or at the start of each session. Minor abilities are unlimited; race
+  abilities come back on rest. The game server refuses an ability that's spent, so the
+  GM narrates that it falters. New abilities unlock at higher levels.
 - **Text / Speech** (top right, remembered per browser). Speech mode is a hands-free
   conversation (**Start conversation**): Deepgram Flux transcribes as you talk, the GM
   answers when you pause, and its reply is read aloud sentence by sentence as it
@@ -212,7 +229,8 @@ Open `https://<host>/` and sign in.
 - **Dice**: the sidebar's dice tray rolls for you (quick dice or notation like `2d6+3`,
   for one of your characters); every roll at the table, the GM's included, appears in the
   story as a card and goes in the chronicle under the roller's name.
-- **Character sheets**: the Party panel shows each character's stats, conditions and
+- **Character sheets**: the Party panel shows each character's stats, abilities (with
+  uses or pool left; click one for what it does and how often), conditions and
   inventory, yours first and expanded.
 - **Voices**: pick the GM's voice in speech mode. Non-player characters' speech is
   tagged by the GM (`<say who="..." voice="feminine|masculine">`) and read in a voice of

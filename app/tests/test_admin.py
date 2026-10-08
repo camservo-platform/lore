@@ -84,7 +84,7 @@ async def test_rename_world_logs_and_rejects_duplicates(app_state, game_tools, c
 
 
 async def test_edit_character_logs_exact_changes(app_state, game_tools, campaign):
-    await game_tools("create_character", campaign=campaign, name="Wren", max_hp=12, player="alice", gold=5)
+    await game_tools("create_character", campaign=campaign, name="Wren", race="Human", character_class="Warden", max_hp=12, player="alice", gold=5)
     _, char = await _ids(app_state, campaign)
     event = await update_character(app_state.pool, char, {"name": "Wren Ashby", "hp": 7, "gold": 5, "player": "bob"}, "dana")
     assert event["type"] == "admin_edit" and event["actor"] == "dana"
@@ -125,7 +125,7 @@ async def test_delete_world_requires_exact_name(app_state, game_tools, lore_tool
 
 
 async def test_delete_character_keeps_the_chronicle(app_state, game_tools, campaign):
-    await game_tools("create_character", campaign=campaign, name="Wren", max_hp=12, player="alice")
+    await game_tools("create_character", campaign=campaign, name="Wren", race="Human", character_class="Warden", max_hp=12, player="alice")
     await game_tools("add_item", campaign=campaign, character="Wren", item="Rope")
     cid, char = await _ids(app_state, campaign)
     history = await app_state.pool.fetchval("SELECT count(*) FROM events WHERE character_id = $1", char)
@@ -147,7 +147,7 @@ async def test_delete_character_keeps_the_chronicle(app_state, game_tools, campa
 
 
 async def test_worlds_lists_characters_and_counts(app_state, game_tools, campaign):
-    await game_tools("create_character", campaign=campaign, name="Wren", max_hp=12, player="alice")
+    await game_tools("create_character", campaign=campaign, name="Wren", race="Human", character_class="Warden", max_hp=12, player="alice")
     [world] = [w for w in await worlds(app_state.pool) if w["name"] == campaign]
     assert world["events"] >= 2 and world["lore"] == 0
     assert [(c["name"], c["player"], c["hp"]) for c in world["characters"]] == [("Wren", "alice", 12)]

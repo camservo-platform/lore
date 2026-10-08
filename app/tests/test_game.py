@@ -7,7 +7,7 @@ from lore.events import stream_key
 
 
 async def make_fighter(game_tools, campaign, **overrides):
-    args = dict(campaign=campaign, name="Brakka", max_hp=20, race="Human", character_class="Warrior",
+    args = dict(campaign=campaign, name="Brakka", max_hp=20, race="Human", character_class="Vanguard",
                 defense=16, player="alice", gold=10)
     return await game_tools("create_character", **(args | overrides))
 
@@ -93,7 +93,7 @@ async def test_update_character_caps_hp(game_tools, campaign):
     await make_fighter(game_tools, campaign)
     c = await game_tools("update_character", campaign=campaign, character="Brakka", reason="curse",
                          max_hp=12, attributes={"strength": 18})
-    assert (c["max_hp"], c["hp"], c["attributes"]) == (12, 12, {"strength": 18})
+    assert (c["max_hp"], c["hp"], c["attributes"]["strength"]) == (12, 12, 18)
 
 
 async def test_failed_change_writes_no_event(game_tools, campaign):
@@ -161,3 +161,124 @@ async def test_end_session_saves_recap_as_lore(game_tools, lore_tools, campaign)
     assert hits[0]["title"] == "Session 1 recap"
     await game_tools("start_session", campaign=campaign)
     assert (await game_tools("end_session", campaign=campaign, summary="Next."))["saved_as_lore"] == "Session 2 recap"
+
+
+# --- races, classes and abilities ------------------------------------------------------
+
+async def make_hero(game_tools, campaign, **overrides):
+    args = dict(campaign=campaign, name="Sela", race="dwarf", character_class="arcanist", player="alice")
+    return await game_tools("create_character", **(args | overrides))
+
+
+def ability(sheet, name):
+    return next(a for a in sheet["abilities"] if a["name"] == name)
+
+
+async def test_player_characters_pick_from_the_catalog(game_tools, campaign):
+    with pytest.raises(ToolFailed, match="Races: Human"):
+        await game_tools("create_character", campaign=campaign, name="Sela", max_hp=10, race="Space Pirate",
+                         character_class="Arcanist", player="alice")
+    sela = await make_hero(game_tools, campaign)
+    # Names are canonicalised; HP, defense, attributes and pool come from race and class.
+    assert (sela["race"], sela["class"], sela["max_hp"], sela["defense"]) == ("Dwarf", "Arcanist", 9, 11)
+    assert sela["attributes"]["strength"] == 9                       # 8 + the dwarf's +1
+    assert (sela["pool_name"], sela["pool"], sela["pool_max"]) == ("Aether", 4, 4)
+    names = [a["name"] for a in sela["abilities"]]
+    assert "Stoneblood" in names and "Spark Lance" in names
+    assert "Binding Glyph" not in names                              # unlocks at level 2
+    # NPCs keep free-form race and class.
+    npc = await game_tools("create_character", campaign=campaign, name="Ogre", max_hp=30, race="Ogre")
+    assert npc["abilities"] == []
+
+
+async def test_uses_and_pools_run_out_and_recover(game_tools, campaign):
+    await make_hero(game_tools, campaign)
+    for left in (3, 2, 1, 0):  # Spark Lance costs 1 Aether
+        sela = await game_tools("use_ability", campaign=campaign, character="Sela", ability="spark lance",
+                                target="a goblin")
+        assert sela["pool"] == left
+    with pytest.raises(ToolFailed, match="costs 1 Aether and Sela has 0"):
+        await game_tools("use_ability", campaign=campaign, character="Sela", ability="Spark Lance")
+    sela = await game_tools("use_ability", campaign=campaign, character="Sela", ability="Read the Weave")  # free
+    assert sela["pool"] == 0
+
+    sela = await game_tools("use_ability", campaign=campaign, character="Sela", ability="Stoneblood")
+    assert ability(sela, "Stoneblood")["uses_left"] == 0
+    with pytest.raises(ToolFailed, match="no uses of Stoneblood left; they come back on recovery"):
+        await game_tools("use_ability", campaign=campaign, character="Sela", ability="Stoneblood")
+    with pytest.raises(ToolFailed, match="They have: Stoneblood"):
+        await game_tools("use_ability", campaign=campaign, character="Sela", ability="Fly")
+
+    [sela] = await game_tools("recover", campaign=campaign, reason="a night at the inn")
+    assert sela["pool"] == 4 and ability(sela, "Stoneblood")["uses_left"] == 1
+    events = await game_tools("recent_events", campaign=campaign, type="ability_used")
+    assert events[0]["summary"] == "Sela used Spark Lance on a goblin (3/4 Aether left)"
+
+
+async def test_session_classes_come_back_each_session_not_on_recovery(game_tools, campaign):
+    await make_hero(game_tools, campaign, name="Ivo", race="Human", character_class="Shade")
+    await game_tools("use_ability", campaign=campaign, character="Ivo", ability="Vanish")
+    [ivo] = await game_tools("recover", campaign=campaign, reason="camp", characters=["Ivo"])
+    assert ability(ivo, "Vanish")["uses_left"] == 1                  # a Shade's tricks wait for the session
+    await game_tools("start_session", campaign=campaign)
+    ivo = await game_tools("get_character", campaign=campaign, character="Ivo")
+    assert ability(ivo, "Vanish")["uses_left"] == 2
+
+
+async def test_level_up_unlocks_abilities_and_grows_the_pool(game_tools, campaign):
+    await make_hero(game_tools, campaign)
+    await game_tools("use_ability", campaign=campaign, character="Sela", ability="Veil of Mist")  # 4 -> 2
+    sela = await game_tools("update_character", campaign=campaign, character="Sela", reason="level up", level=2)
+    assert (sela["pool"], sela["pool_max"]) == (4, 6)                # spent points stay spent
+    assert "Binding Glyph" in [a["name"] for a in sela["abilities"]]
+    events = await game_tools("recent_events", campaign=campaign, type="character_updated")
+    assert events[-1]["summary"] == "Sela: level up (new: Binding Glyph)"
+
+
+async def test_world_themes_rename_core_options_but_keep_the_numbers(game_tools, campaign):
+    await game_tools("theme_core_options", campaign=campaign, themes=[{
+        "key": "arcanist", "name": "Techno-Witch", "summary": "Hacks reality with salvaged code.",
+        "pool_name": "Charge",
+        "abilities": [{"key": "spark-lance", "name": "Arc Bolt",
+                       "effect": "One target in sight takes 1d10 energy damage on a hit."},
+                      {"key": "veil-of-mist", "name": "Smoke Screen", "effect": "Smoke fills 99 paces."}],
+    }])
+    options = await game_tools("list_character_options", campaign=campaign)
+    witch = next(o for o in options["classes"] if o["key"] == "arcanist")
+    assert (witch["name"], witch["resource"]["name"]) == ("Techno-Witch", "Charge")
+    smoke = next(a for a in witch["abilities"] if a["key"] == "veil-of-mist")
+    assert smoke["effect"].startswith("Fog fills about ten paces")   # changed a number: core wording kept
+
+    hero = await make_hero(game_tools, campaign, character_class="techno-witch")
+    assert hero["class"] == "Techno-Witch" and hero["pool_name"] == "Charge"
+    assert ability(hero, "Arc Bolt")["effect"] == "One target in sight takes 1d10 energy damage on a hit."
+    with pytest.raises(ToolFailed, match="clash"):
+        await game_tools("theme_core_options", campaign=campaign, themes=[{"key": "warden", "name": "Techno-Witch"}])
+
+
+async def test_worlds_can_add_their_own_options(game_tools, campaign):
+    option = {"kind": "race", "name": "Tidekin", "summary": "Sea folk.", "description": "Born of the tide.",
+              "hp": 9, "attributes": {"agility": 1},
+              "abilities": [{"name": "Gills", "summary": "Breathe water.", "description": "You breathe water.",
+                             "effect": "Breathe underwater.", "level": 1, "uses": 0}]}
+    added = await game_tools("add_world_option", campaign=campaign, option=option)
+    assert added["hp"] == 3 and added["abilities"][0]["uses"] is None  # clamped; 0 uses means unlimited
+    options = await game_tools("list_character_options", campaign=campaign)
+    assert [o["name"] for o in options["races"]][-1] == "Tidekin" and options["races"][-1]["world"]
+    with pytest.raises(ToolFailed, match="already"):
+        await game_tools("add_world_option", campaign=campaign, option=option)
+
+
+async def test_existing_characters_choose_once_and_story_grants_abilities(game_tools, campaign):
+    await game_tools("create_character", campaign=campaign, name="Old", max_hp=10, race="goblin")  # made before races gave abilities
+    old = await game_tools("choose_race_and_class", campaign=campaign, character="Old", race="Elf",
+                           character_class="Mender")
+    assert (old["race"], old["class"], old["max_hp"]) == ("Elf", "Mender", 10)  # HP kept
+    assert "Mend Wounds" in [a["name"] for a in old["abilities"]]
+    with pytest.raises(ToolFailed, match="already has a race and class"):
+        await game_tools("choose_race_and_class", campaign=campaign, character="Old", race="Elf",
+                         character_class="Shade")
+    old = await game_tools("grant_ability", campaign=campaign, character="Old", name="Lantern of Ages",
+                           summary="An old lantern's light.", effect="Reveals invisible things.",
+                           source="relic", uses=1)
+    assert ability(old, "Lantern of Ages")["uses_left"] == 1

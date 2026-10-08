@@ -211,8 +211,16 @@ def format_table_state(characters: list[dict[str, Any]], sheets: list[dict[str, 
         if c["status"] != "alive":
             details.append(c["status"])
         details += sheet.get("conditions") or []
+        # What they can still use: the GM must not narrate an ability that's spent.
+        if sheet.get("pool_max"):
+            details.append(f"{sheet['pool_name']} {sheet['pool']}/{sheet['pool_max']}")
+        limited = [f"{a['name']} {a['uses_left']}/{a['max_uses']}" for a in sheet.get("abilities") or []
+                   if a["max_uses"] is not None]
+        if limited:
+            details.append("uses left: " + ", ".join(limited))
         where = f"; at {c['location']}" if c["location"] else ""
-        owner = f"player: {c['player']}" if c["player"] else "NPC"
+        identity = " ".join(x for x in (sheet.get("race"), sheet.get("class")) if x)
+        owner = (f"player: {c['player']}" if c["player"] else "NPC") + (f", {identity}" if identity else "")
         lines.append(f"- {c['name']} ({owner}): {', '.join(details)}{where}")
     if not characters:
         lines.append("Characters: none yet")
@@ -499,6 +507,43 @@ def create_app(drain: Drain | None = None) -> Starlette:
             except ToolCallError as e:
                 raise HTTPException(404, str(e)) from None
         return JSONResponse({"characters": list(sheets), "events": events})
+
+    async def character_options(request: Request) -> Response:
+        """The races and classes to pick from at this table (core, as this world names them, plus its own)."""
+        async with toolbox.session(await user_of(request)) as tools:
+            try:
+                return JSONResponse(await tools.call_json("list_character_options",
+                                                          campaign=request.query_params["name"]))
+            except ToolCallError as e:
+                raise HTTPException(404, str(e)) from None
+
+    async def create_character(request: Request) -> Response:
+        """A player makes their character from the picker (name, race, class). For a character
+        made before races and classes gave abilities, `existing` names it and only race and
+        class are set."""
+        user = await user_of(request)
+        body = await request.json()
+        name = (body.get("name") or "").strip()
+        async with toolbox.session(user) as tools:
+            try:
+                if body.get("existing"):
+                    sheet = await tools.call_json("get_character", campaign=body["campaign"],
+                                                  character=body["existing"])
+                    if sheet["player"] != user:
+                        raise HTTPException(403, "That's not your character.")
+                    sheet = await tools.call_json(
+                        "choose_race_and_class", campaign=body["campaign"], character=sheet["name"],
+                        race=body.get("race", ""), character_class=body.get("class", ""))
+                else:
+                    if not name or len(name) > 40:
+                        return JSONResponse({"error": "Give your character a name (up to 40 characters)."},
+                                            status_code=400)
+                    sheet = await tools.call_json(
+                        "create_character", campaign=body["campaign"], name=name, race=body.get("race", ""),
+                        character_class=body.get("class", ""), player=user)
+            except ToolCallError as e:
+                return JSONResponse({"error": str(e)}, status_code=400)
+        return JSONResponse(sheet)
 
     async def forge_world(request: Request) -> Response:
         user = await user_of(request)
@@ -1083,6 +1128,8 @@ def create_app(drain: Drain | None = None) -> Starlette:
             Route("/api/campaigns", campaigns),
             Route("/api/worlds", forge_world, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/state", campaign_state),
+            Route("/api/campaigns/{campaign_id:int}/options", character_options),
+            Route("/api/campaigns/{campaign_id:int}/characters", create_character, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/turn", take_turn, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/reset", reset_table, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/lines", recent_lines),
