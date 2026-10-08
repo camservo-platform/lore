@@ -12,6 +12,7 @@ const state = {
   myTurns: new Set(),  // turn ids started from this tab (skip their echo on the feed)
   feed: null,
   voice: null,         // the GM's TTS voice (null: server default)
+  sheets: new Map(),   // character name -> expanded? (survives sidebar refreshes)
 };
 
 // ---------- helpers -------------------------------------------------------------------
@@ -180,6 +181,7 @@ $("forge").addEventListener("submit", async (e) => {
 
 async function enterCampaign(campaign, fresh) {
   talk.stop();
+  if (state.campaign?.id !== campaign.id) state.sheets.clear();
   state.campaign = campaign;
   showView("table");
   $("campaign-title").textContent = campaign.name;
@@ -320,18 +322,45 @@ async function refreshState() {
   }
 }
 
+// Party with full character sheets: yours first and expanded, others collapsed.
 function renderParty(characters) {
   const party = $("party");
   party.innerHTML = characters.length ? "" : '<li class="meta">No characters yet.</li>';
-  for (const c of characters) {
+  const mine = (c) => c.player === state.user;
+  const ordered = [...characters].sort((a, b) => mine(b) - mine(a));
+  for (const c of ordered) {
     const li = document.createElement("li");
     if (c.status !== "alive") li.className = "down";
     const pct = Math.max(0, Math.min(100, (100 * c.hp) / c.max_hp));
+    const who = c.player ? (mine(c) ? "you" : escapeHtml(c.player)) : "NPC";
+    const open = state.sheets.has(c.name) ? state.sheets.get(c.name) : mine(c);
+    const identity = [c.race, c.class].filter(Boolean).map(escapeHtml).join(" ");
+    const attributes = Object.entries(c.attributes || {});
     li.innerHTML = `
-      <div><span class="name">${escapeHtml(c.name)}</span>
-        <span class="meta">${c.player ? escapeHtml(c.player) : "NPC"}${c.status !== "alive" ? " · " + c.status : ""}</span></div>
-      <div class="hp"><div style="width:${pct}%"></div></div>
-      <div class="meta">${c.hp}/${c.max_hp} HP${c.location ? " · " + escapeHtml(c.location) : ""}</div>`;
+      <details ${open ? "open" : ""}>
+        <summary>
+          <div><span class="name">${escapeHtml(c.name)}</span>
+            <span class="meta">${who}${c.status !== "alive" ? " · " + c.status : ""}</span></div>
+          <div class="hp"><div style="width:${pct}%"></div></div>
+          <div class="meta">${c.hp}/${c.max_hp} HP${c.temp_hp ? ` (+${c.temp_hp} temp)` : ""}${
+            c.location ? " · " + escapeHtml(c.location) : ""}</div>
+        </summary>
+        <div class="sheet">
+          <div class="meta">Level ${c.level}${identity ? " " + identity : ""}</div>
+          <dl class="stats">
+            <div><dt>Defense</dt><dd>${c.defense}</dd></div>
+            <div><dt>Gold</dt><dd>${c.gold}</dd></div>
+            ${attributes.map(([k, v]) => `<div><dt>${escapeHtml(k)}</dt><dd>${escapeHtml(String(v))}</dd></div>`).join("")}
+          </dl>
+          ${c.conditions.length ? `<div class="conditions">${c.conditions.map((x) => `<span>${escapeHtml(x)}</span>`).join("")}</div>` : ""}
+          <div class="inventory-title">Inventory</div>
+          <ul class="inventory">${c.inventory.length
+            ? c.inventory.map((i) => `<li title="${escapeHtml(i.description || "")}"><span>${escapeHtml(i.name)}</span>${
+                i.quantity > 1 ? `<span class="qty">×${i.quantity}</span>` : ""}</li>`).join("")
+            : '<li class="meta">Empty</li>'}</ul>
+        </div>
+      </details>`;
+    li.querySelector("details").addEventListener("toggle", (e) => state.sheets.set(c.name, e.target.open));
     party.append(li);
   }
 }

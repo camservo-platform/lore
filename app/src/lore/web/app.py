@@ -264,11 +264,17 @@ def create_app() -> Starlette:
         name = request.query_params["name"]
         async with toolbox.session(user_of(request)) as tools:
             try:
-                characters = await tools.call_json("list_characters", campaign=name)
-                events = await tools.call_json("recent_events", campaign=name, limit=30)
+                characters, events = await asyncio.gather(
+                    tools.call_json("list_characters", campaign=name),
+                    tools.call_json("recent_events", campaign=name, limit=30),
+                )
+                # Full sheets (attributes, conditions, gold, inventory) for the sidebar.
+                sheets = await asyncio.gather(*(
+                    tools.call_json("get_character", campaign=name, character=c["name"]) for c in characters
+                ))
             except ToolCallError as e:
                 raise HTTPException(404, str(e)) from None
-        return JSONResponse({"characters": characters, "events": events})
+        return JSONResponse({"characters": list(sheets), "events": events})
 
     async def forge_world(request: Request) -> Response:
         user = user_of(request)
