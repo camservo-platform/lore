@@ -5,6 +5,7 @@ produced them), so callers persist `messages` as returned and only ever add to i
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -33,6 +34,17 @@ How you run the game:
 - Narrate vividly but keep the players in control: describe the situation, play the
   non-player characters, and ask what they do. Never decide a player character's
   actions, words or feelings for them.
+- Be brief by default: usually two to four sentences covering what the characters
+  notice and what just changed, then hand the scene back. Go longer only when a player
+  asks for more (looking closer, questioning someone, searching) or when something truly
+  important happens: arriving somewhere new, a major revelation, a dramatic turn in a
+  fight.
+- Let the players discover the world's secrets themselves. Never recite lore wholesale
+  or reveal hidden truths unprompted (an NPC's secret, which rumors are true, where a
+  storyline is heading). Plant concrete hints instead: an odd detail, a nervous glance,
+  a mark that doesn't belong, a story that doesn't add up. Reveal more as players
+  investigate, ask the right people or succeed on rolls; if they seem stuck, make the
+  hints stronger rather than handing over the answer.
 - The game server is the truth for numbers. Read character sheets before relying on
   them and change HP, items, gold, conditions, status and location only through its
   tools. Use roll_dice for every uncertain outcome (pass the campaign and character so
@@ -46,9 +58,26 @@ How you run the game:
   before play begins.
 - If a session is not open, start one when play begins; when the players stop for the
   day, end it with a short recap.
-- Keep turns brisk: a few short paragraphs at most, ending with a prompt for action.
 - Use plain generic fantasy terminology and your own invented names; never refer to
-  commercial games, publishers or their trademarked rules, places or creatures."""
+  commercial games, publishers or their trademarked rules, places or creatures. Give
+  characters attributes that suit the world and the character rather than a standard
+  fixed set of stats."""
+
+def system_prompt(campaign: str) -> str:
+    return f"{SYSTEM}\n\nThis table's campaign is named {json.dumps(campaign)}."
+
+
+def instructions_version(campaign: str) -> str:
+    return hashlib.sha256(system_prompt(campaign).encode()).hexdigest()[:16]
+
+
+def updated_instructions(campaign: str) -> str:
+    """For a conversation that started under older instructions: its top-level system
+    prompt stays frozen (thinking blocks are bound to it), so the new ones are appended."""
+    return "Your instructions have been updated. From now on, follow these in place of the earlier ones:\n\n" + (
+        system_prompt(campaign)
+    )
+
 
 SPEECH_STYLE = (
     "The table is now in speech mode: your replies are read aloud. Use plain spoken prose with "
@@ -142,9 +171,9 @@ def echo_content(content: list[Any]) -> list[dict[str, Any]]:
     return [b for i, b in enumerate(blocks) if i > boundary or b["type"] not in drop]
 
 
-def style_message(mode: str) -> dict[str, Any]:
-    """Mid-conversation operator instruction for a change of table mode."""
-    return {"role": "system", "content": SPEECH_STYLE if mode == "speech" else TEXT_STYLE}
+def style_note(mode: str) -> str:
+    """Operator instruction for a change of table mode."""
+    return SPEECH_STYLE if mode == "speech" else TEXT_STYLE
 
 
 class GameMaster:
@@ -154,12 +183,14 @@ class GameMaster:
         self._model = model
         self._effort = effort
 
-    async def turn(self, campaign: str, user: str, messages: list[dict[str, Any]]) -> AsyncIterator[dict[str, Any]]:
+    async def turn(
+        self, campaign: str, user: str, system: str, messages: list[dict[str, Any]]
+    ) -> AsyncIterator[dict[str, Any]]:
         """Runs the GM until it hands control back to the players, appending to `messages`.
+        `system` must be the prompt the conversation started with.
 
         Yields {"type": "text", "text"} deltas, {"type": "tool", "name"} as tools run, and
         finally {"type": "done", "text"} with the narration of this turn."""
-        system = f"{SYSTEM}\n\nThis table's campaign is named {json.dumps(campaign)}."
         narration: list[str] = []
         async with self._toolbox.session(user) as tools:
             for _ in range(MAX_ROUNDS):
@@ -231,6 +262,7 @@ class _Round:
     def __init__(self, stream_manager, narration: list[str]):
         self._manager = stream_manager
         self._narration = narration
+        self._new_block = False
         self.final = None
 
     def __aiter__(self):
@@ -241,11 +273,14 @@ class _Round:
             async for event in stream:
                 if event.type == "content_block_start" and event.content_block.type == "tool_use":
                     yield {"type": "tool", "name": event.content_block.name}
-                elif event.type == "content_block_start" and event.content_block.type == "text" and self._narration:
-                    # Separate narration from successive rounds.
-                    self._narration.append("\n\n")
-                    yield {"type": "text", "text": "\n\n"}
-                elif event.type == "text":
+                elif event.type == "content_block_start" and event.content_block.type == "text":
+                    self._new_block = True
+                elif event.type == "text" and event.text:
+                    if self._new_block and "".join(self._narration).strip():
+                        # Separate narration from earlier text blocks (e.g. before a tool call).
+                        self._narration.append("\n\n")
+                        yield {"type": "text", "text": "\n\n"}
+                    self._new_block = False
                     self._narration.append(event.text)
                     yield {"type": "text", "text": event.text}
             self.final = await stream.get_final_message()

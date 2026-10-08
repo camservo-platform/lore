@@ -1,4 +1,4 @@
-from lore.gm import echo_content, style_message
+from lore.gm import echo_content, instructions_version, style_note, system_prompt, updated_instructions
 from lore.web.app import _complete_history
 
 
@@ -29,7 +29,11 @@ def test_complete_history_drops_unanswered_tool_call_only():
     assert _complete_history([]) == []
 
 
-def test_style_messages():
-    assert style_message("speech")["role"] == "system"
-    assert "markdown" in style_message("speech")["content"]
-    assert "text mode" in style_message("text")["content"]
+def test_style_notes():
+    assert "markdown" in style_note("speech")
+    assert "text mode" in style_note("text")
+
+
+def test_instructions_are_versioned_per_campaign():
+    assert instructions_version("A") == instructions_version("A") != instructions_version("B")
+    assert updated_instructions("A").endswith(system_prompt("A"))

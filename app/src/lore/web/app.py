@@ -32,7 +32,9 @@ from lore import admin, worldgen
 from lore.db import create_pool
 from lore.embeddings import OllamaEmbedder
 from lore.events import stream_key
-from lore.gm import GameMaster, Toolbox, ToolCallError, style_message
+from lore.gm import (
+    GameMaster, Toolbox, ToolCallError, instructions_version, style_note, system_prompt, updated_instructions,
+)
 from lore.mcp.common import USER_HEADER
 from lore.settings import Settings
 from lore.voice import Voice
@@ -88,20 +90,27 @@ class Table:
         self.redis = redis
         self.messages = f"lore:campaign:{campaign_id}:gm:messages"
         self.mode = f"lore:campaign:{campaign_id}:gm:mode"
+        # The top-level system prompt the conversation started with, and the version of the
+        # instructions it has been given since (see gm.updated_instructions).
+        self.system = f"lore:campaign:{campaign_id}:gm:system"
+        self.version = f"lore:campaign:{campaign_id}:gm:version"
         self.lock = f"lore:campaign:{campaign_id}:gm:lock"
         self.chat = f"lore:campaign:{campaign_id}:chat"
         self.events = stream_key(campaign_id)
 
-    async def load(self) -> tuple[list[dict[str, Any]], str | None]:
-        raw, mode = await self.redis.mget(self.messages, self.mode)
-        return (json.loads(raw) if raw else []), mode
+    async def load(self) -> dict[str, Any]:
+        raw, mode, system, version = await self.redis.mget(self.messages, self.mode, self.system, self.version)
+        return {"messages": json.loads(raw) if raw else [], "mode": mode, "system": system, "version": version}
 
-    async def save(self, messages: list[dict[str, Any]], mode: str) -> None:
-        await self.redis.set(self.messages, json.dumps(messages), ex=TRANSCRIPT_TTL)
-        await self.redis.set(self.mode, mode, ex=TRANSCRIPT_TTL)
+    async def save(self, messages: list[dict[str, Any]], mode: str, system: str, version: str) -> None:
+        async with self.redis.pipeline() as pipe:
+            for key, value in ((self.messages, json.dumps(messages)), (self.mode, mode),
+                               (self.system, system), (self.version, version)):
+                pipe.set(key, value, ex=TRANSCRIPT_TTL)
+            await pipe.execute()
 
     async def reset(self) -> None:
-        await self.redis.delete(self.messages, self.mode)
+        await self.redis.delete(self.messages, self.mode, self.system, self.version)
 
 
 def _complete_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -216,14 +225,27 @@ def create_app() -> Starlette:
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
         async def run() -> None:
-            messages, last_mode = await table.load()
-            messages = _complete_history(messages)
+            saved = await table.load()
+            messages = _complete_history(saved["messages"])
+            current = instructions_version(campaign)
+            if messages:
+                # Conversations from before instructions were versioned get the update once.
+                system, version = saved["system"] or system_prompt(campaign), saved["version"] or "unversioned"
+            else:
+                system, version = system_prompt(campaign), current
             messages.append({"role": "user", "content": f"{user}: {text}"})
-            if mode != last_mode:
-                messages.append(style_message(mode))
+            # Operator notes go in one appended system message: never edit what was sent.
+            notes = []
+            if version != current:
+                notes.append(updated_instructions(campaign))
+                version = current
+            if mode != saved["mode"]:
+                notes.append(style_note(mode))
+            if notes:
+                messages.append({"role": "system", "content": "\n\n".join(notes)})
             reply = ""
             try:
-                async for event in gm.turn(campaign, user, messages):
+                async for event in gm.turn(campaign, user, system, messages):
                     if event["type"] == "done":
                         reply = event["text"]
                     await queue.put(event)
@@ -231,7 +253,7 @@ def create_app() -> Starlette:
                 log.exception("turn failed")
                 await queue.put({"type": "error", "text": f"Something went wrong: {e}"})
             finally:
-                await table.save(_complete_history(messages), mode)
+                await table.save(_complete_history(messages), mode, system, version)
                 await redis.delete(table.lock)
                 if reply:
                     await redis.xadd(
