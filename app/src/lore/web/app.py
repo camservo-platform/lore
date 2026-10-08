@@ -391,17 +391,23 @@ def create_app() -> Starlette:
             await asyncio.sleep(0.5)
         return True
 
-    async def table_state(campaign: str, user: str) -> str | None:
+    async def table_state(campaign: str, user: str, new_conversation: bool) -> str | None:
         try:
             async with toolbox.session(user) as tools:
-                characters, events = await asyncio.gather(
+                characters, events, recaps = await asyncio.gather(
                     tools.call_json("list_characters", campaign=campaign),
                     tools.call_json("recent_events", campaign=campaign, limit=6),
+                    # A fresh conversation starts from the last session's recap.
+                    tools.call_json("recent_events", campaign=campaign, limit=1, type="session_ended")
+                    if new_conversation else asyncio.sleep(0, []),
                 )
                 sheets = await asyncio.gather(*(
                     tools.call_json("get_character", campaign=campaign, character=c["name"]) for c in characters
                 ))
-            return format_table_state(characters, list(sheets), events)
+            state = format_table_state(characters, list(sheets), events)
+            if recaps:
+                state += f"\n[Previously: {recaps[0]['summary']}]"
+            return state
         except Exception:
             log.exception("couldn't read the table state; the GM will look it up itself")
             return None
@@ -424,7 +430,7 @@ def create_app() -> Starlette:
             system, version = saved["system"] or system_prompt(campaign), saved["version"] or "unversioned"
         else:
             system, version = system_prompt(campaign), current
-        state = await table_state(campaign, user)
+        state = await table_state(campaign, user, new_conversation=not messages)
         messages.append({"role": "user", "content": f"{user}: {text}" + (f"\n\n{state}" if state else "")})
         # Operator notes go in one appended system message: never edit what was sent.
         notes = []
@@ -599,6 +605,24 @@ def create_app() -> Starlette:
 
         return sse(events())
 
+    def npc_voices_key(campaign_id: int) -> str:
+        return f"lore:campaign:{campaign_id}:npc-voices"
+
+    async def npc_voice(campaign_id: int, name: str, gender: str, narrator: str) -> str:
+        """The voice this NPC always speaks with in this world, assigned on first use."""
+        key, field = npc_voices_key(campaign_id), name.strip().lower()
+        assigned = await redis.hget(key, field)
+        voices = await voice.voices()
+        if not assigned:
+            taken = set(await redis.hvals(key))
+            candidate = voice.pick_npc_voice(voices, field, gender, taken, avoid={voice.default_voice, narrator})
+            await redis.hsetnx(key, field, candidate)  # first writer wins if two players race
+            assigned = await redis.hget(key, field)
+        if assigned == narrator:
+            # This player picked the NPC's voice for their narrator; borrow another for them.
+            return voice.pick_npc_voice(voices, field, gender, {assigned}, avoid={narrator})
+        return assigned
+
     async def tts(request: Request) -> Response:
         """MP3 for `text`, streamed. GET (text in the query) lets an <audio> element start
         playing as the first bytes arrive instead of after the whole clip is synthesised."""
@@ -610,7 +634,11 @@ def create_app() -> Starlette:
         text, chosen = (params.get("text") or "").strip(), params.get("voice")
         if not text:
             raise HTTPException(400, "No text.")
-        audio = require_voice().speak(text, chosen)
+        tts_voice = require_voice()
+        if params.get("npc") and params.get("campaign_id"):
+            chosen = await npc_voice(int(params["campaign_id"]), params["npc"], params.get("npc_voice") or "",
+                                     narrator=await tts_voice.resolve(chosen))
+        audio = tts_voice.speak(text, chosen)
         await usage.tts(len(text))
         # Pull the first chunk before answering so Deepgram errors become a proper status.
         first = await anext(audio)
@@ -673,6 +701,23 @@ def create_app() -> Starlette:
         await bus.publish(event)
         log.info("admin %s: %s", user, event["summary"])
         return JSONResponse(event)
+
+    async def admin_npc_voices(request: Request) -> Response:
+        await require_admin(request)
+        campaign_id = int(request.path_params["campaign_id"])
+        if request.method == "POST":
+            body = await request.json()
+            name, chosen = (body.get("name") or "").strip().lower(), body.get("voice") or ""
+            if not name:
+                return JSONResponse({"error": "Which character?"}, status_code=400)
+            if chosen:
+                if chosen not in {v["id"] for v in await require_voice().voices()}:
+                    return JSONResponse({"error": "Unknown voice."}, status_code=400)
+                await redis.hset(npc_voices_key(campaign_id), name, chosen)
+            else:
+                await redis.hdel(npc_voices_key(campaign_id), name)  # reassigned on next line
+        assigned = await redis.hgetall(npc_voices_key(campaign_id))
+        return JSONResponse([{"name": n, "voice": v} for n, v in sorted(assigned.items())])
 
     async def admin_presence(request: Request) -> Response:
         await presence.seen(await require_admin(request), "admin")
@@ -796,6 +841,7 @@ def create_app() -> Starlette:
             Route("/api/admin/worlds/{campaign_id:int}/delete", admin_delete_world, methods=["POST"]),
             Route("/api/admin/characters/{character_id:int}", admin_edit_character, methods=["POST"]),
             Route("/api/admin/presence", admin_presence),
+            Route("/api/admin/worlds/{campaign_id:int}/npc-voices", admin_npc_voices, methods=["GET", "POST"]),
             Route("/api/admin/tables", admin_tables),
             Route("/api/admin/tables/{campaign_id:int}/unlock", admin_unlock_table, methods=["POST"]),
             Route("/api/admin/tables/{campaign_id:int}/reset", admin_reset_table, methods=["POST"]),

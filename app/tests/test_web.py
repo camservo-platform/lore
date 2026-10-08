@@ -106,3 +106,21 @@ async def test_presence_tracks_where_and_voice(redis):
     people = {p["user"]: p for p in await presence.everyone()}
     assert people["alice"]["online"] and people["alice"]["voice"] and people["alice"]["campaign_id"] == 7
     assert not people["bob"]["online"] and people["bob"]["where"] == "lobby"
+
+
+def test_npc_voice_pick_matches_gender_avoids_narrator_and_is_stable():
+    from lore.voice import Voice
+    voice = Voice("key", "aura-2-pandora-en")
+    voices = [{"id": "aura-2-pandora-en", "gender": "feminine"}, {"id": "aura-2-cora-en", "gender": "feminine"},
+              {"id": "aura-2-luna-en", "gender": "feminine"}, {"id": "aura-2-zeus-en", "gender": "masculine"},
+              {"id": "aura-2-orion-en", "gender": "masculine"}]
+    avoid = {"aura-2-pandora-en"}
+    quell = voice.pick_npc_voice(voices, "harrow quell", "masculine", set(), avoid)
+    assert quell in {"aura-2-zeus-en", "aura-2-orion-en"}
+    assert voice.pick_npc_voice(voices, "harrow quell", "masculine", set(), avoid) == quell     # stable
+    other = voice.pick_npc_voice(voices, "brother odran", "masculine", {quell}, avoid)
+    assert other != quell and other in {"aura-2-zeus-en", "aura-2-orion-en"}                   # distinct
+    marta = voice.pick_npc_voice(voices, "marta", "feminine", set(), avoid)
+    assert marta in {"aura-2-cora-en", "aura-2-luna-en"}                                      # never the narrator
+    # Everyone taken: reuse rather than fail.
+    assert voice.pick_npc_voice(voices, "x", "masculine", {"aura-2-zeus-en", "aura-2-orion-en"}, avoid)

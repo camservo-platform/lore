@@ -149,3 +149,15 @@ async def test_roll_dice_rejects_bad_notation(game_tools, notation):
 async def test_roll_dice_without_campaign_logs_nothing(game_tools):
     r = await game_tools("roll_dice", notation="D20", reason="test")
     assert 1 <= r["total"] <= 20
+
+
+async def test_end_session_saves_recap_as_lore(game_tools, lore_tools, campaign):
+    await game_tools("start_session", campaign=campaign)
+    result = await game_tools("end_session", campaign=campaign, summary="Wren found the drowned bell under the ice.")
+    assert result["saved_as_lore"] == "Session 1 recap"
+    [entry] = await lore_tools("get_lore", campaign=campaign, title="Session 1 recap")
+    assert entry["kind"] == "history" and entry["tags"] == ["session-recap"]
+    hits = await lore_tools("search_lore", campaign=campaign, query="drowned bell ice", kind="history")
+    assert hits[0]["title"] == "Session 1 recap"
+    await game_tools("start_session", campaign=campaign)
+    assert (await game_tools("end_session", campaign=campaign, summary="Next."))["saved_as_lore"] == "Session 2 recap"

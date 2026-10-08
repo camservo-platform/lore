@@ -307,6 +307,14 @@ body.login { align-items: center; justify-content: center; min-height: 100%; pad
 .roll-card .faces { color: var(--muted); font-variant-numeric: tabular-nums; }
 @keyframes tumble { 0% { transform: rotate(-200deg) scale(0.3); opacity: 0; } 100% { transform: none; opacity: 1; } }
 
+.npc-line { font-style: italic; }
+.npc-voices { display: grid; gap: 6px; }
+.npc-voices select { width: 100%; padding: 4px 6px; font-size: 12px; }
+.npc-name {
+  font: 600 11px/1 var(--sans); font-style: normal; letter-spacing: 0.04em; text-transform: uppercase;
+  color: var(--accent); margin-right: 6px; vertical-align: 2px;
+}
+
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px);
   background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; box-shadow: var(--shadow); z-index: 10;

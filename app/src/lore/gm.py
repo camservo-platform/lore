@@ -39,6 +39,10 @@ How you run the game:
 - Narrate vividly but keep the players in control: describe the situation, play the
   non-player characters, and ask what they do. Never decide a player character's
   actions, words or feelings for them.
+- When a non-player character speaks aloud, put their exact words in a tag:
+  <say who="Harrow Quell" voice="masculine">Which guild is lying to me?</say>
+  Narration stays outside the tag. Use the same name every time a character speaks (so
+  they keep their voice) and give voice="feminine" or voice="masculine" when you know it.
 - Be brief by default: usually two to four sentences covering what the characters
   notice and what just changed, then hand the scene back. Go longer only when a player
   asks for more (looking closer, questioning someone, searching) or when something truly
@@ -100,8 +104,9 @@ def updated_instructions(campaign: str) -> str:
 
 SPEECH_STYLE = (
     "The table is now in speech mode: your replies are read aloud. Use plain spoken prose with "
-    "no markdown, lists, headings or symbols, spell out numbers naturally, and keep each reply "
-    "to a few sentences unless the moment calls for more."
+    "no markdown, lists, headings or symbols (the <say> tags for characters' speech are fine: "
+    "each character is read in their own voice), spell out numbers naturally, and keep each "
+    "reply to a few sentences unless the moment calls for more."
 )
 TEXT_STYLE = "The table is now in text mode: your replies are read on screen. Light markdown is fine."
 

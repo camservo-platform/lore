@@ -1,6 +1,7 @@
 """Deepgram text-to-speech, proxied so the API key stays server-side. Speech-to-text is
 live, over Flux: see lore.web.conversation."""
 
+import hashlib
 import time
 from collections.abc import AsyncIterator
 from typing import Any
@@ -60,6 +61,19 @@ class Voice:
             except httpx.HTTPError:
                 pass
         return self._tts_model
+
+    def pick_npc_voice(self, voices: list[dict[str, Any]], name: str, gender: str, taken: set[str],
+                       avoid: set[str]) -> str:
+        """A voice for a new NPC: matching `gender` when given, not one in `avoid` (the narrator's),
+        preferring one no other NPC in the world has; stable for a given name."""
+        pool = [v for v in voices if v["id"] not in avoid]
+        if gender in ("feminine", "masculine"):
+            pool = [v for v in pool if v["gender"] == gender] or pool
+        fresh = [v for v in pool if v["id"] not in taken] or pool
+        if not fresh:
+            return self._tts_model
+        digest = int(hashlib.sha256(name.lower().encode()).hexdigest(), 16)
+        return fresh[digest % len(fresh)]["id"]
 
     async def speak(self, text: str, voice: str | None = None) -> AsyncIterator[bytes]:
         """MP3 audio for `text`, streamed as Deepgram produces it."""

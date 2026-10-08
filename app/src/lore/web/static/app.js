@@ -30,23 +30,49 @@ function escapeHtml(s) {
 }
 
 // Just enough markdown for narration: paragraphs, line breaks, bold, italics.
+// Characters' speech arrives as <say who="Name" voice="...">words</say> (see gm.SYSTEM).
+const SAY = /<say\b([^>]*)>([\s\S]*?)(?:<\/say>|$)/g;
+// A tag still arriving at the end of streamed text: "<", "<sa", "<say who=", "</sa"...
+const PARTIAL_TAG = /<\/?(s(a(y[^>]*)?)?)?$/;
+
+function sayAttr(attrs, name) {
+  const m = new RegExp(`${name}\\s*=\\s*"([^"]*)"`).exec(attrs);
+  return m ? m[1] : "";
+}
+
+function inlineMarkdown(html) {
+  return html
+    .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
+    .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+}
+
+// Just enough markdown for narration (paragraphs, line breaks, bold, italics), with
+// characters' lines shown under their names.
 function renderMarkdown(text) {
+  const lines = [];
+  text = text.replace(PARTIAL_TAG, "").replace(SAY, (_, attrs, words) => {
+    lines.push({ who: sayAttr(attrs, "who"), words: words.trim().replace(/^["“]|["”]$/g, "") });
+    return `\u0000${lines.length - 1}\u0000`;
+  });
   return text
     .trim()
     .split(/\n{2,}/)
     .map((p) => {
-      const html = escapeHtml(p)
-        .replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>")
-        .replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>")
+      const html = inlineMarkdown(escapeHtml(p))
         .replace(/^#+\s*/gm, "")
-        .replace(/\n/g, "<br>");
+        .replace(/\n/g, "<br>")
+        .replace(/\u0000(\d+)\u0000/g, (_, i) => {
+          const line = lines[Number(i)];
+          return `<span class="npc-line">${line.who ? `<span class="npc-name">${escapeHtml(line.who)}</span>` : ""}` +
+            `“${inlineMarkdown(escapeHtml(line.words))}”</span>`;
+        });
       return `<p>${html}</p>`;
     })
     .join("");
 }
 
 function plainText(text) {
-  return text.replace(/[*_#`>]/g, "").replace(/\s+/g, " ").trim();
+  return text.replace(/<\/?say[^>]*>/g, "").replace(/[*_#`>]/g, "").replace(/\s+/g, " ").trim();
 }
 
 async function api(path, options = {}) {
@@ -477,8 +503,12 @@ function closeFeed() {
 
 // Speaks narration as it streams: complete sentences are sent to TTS in chunks and
 // played back in order while later text is still arriving.
+// Splits streamed narration into chunks per speaker: the narrator in the player's chosen
+// voice, each <say> character in the voice the world gave them.
 const speaker = {
-  pending: "",
+  pending: "",      // text for the current speaker not yet sent to TTS
+  raw: "",          // incoming text not yet parsed for <say> tags
+  npc: null,        // {who, voice} while inside a <say>, else null (narrator)
   queued: 0,      // chunks fetched or playing
   speaking: false,
   silenced: false, // stopped by the player: the rest of this reply stays quiet
@@ -488,23 +518,60 @@ const speaker = {
   audio: null,
   generation: 0,
   begin() {
-    this.pending = "";
+    this.pending = this.raw = "";
+    this.npc = null;
     this.silenced = false;
     this.started = false;
   },
   feed(text) {
     if (this.silenced) return;
-    this.pending += text;
+    this.raw += text;
+    this.parse();
     const cut = this.lastBoundary(this.pending);
     // Get the first sentence out quickly; after that, longer chunks sound more natural.
     if (cut > (this.started ? 160 : 40)) {
-      this.say(this.pending.slice(0, cut));
+      this.say(this.pending.slice(0, cut), this.npc);
       this.pending = this.pending.slice(cut);
     }
   },
-  flush() {
-    if (!this.silenced && this.pending.trim()) this.say(this.pending);
+  // Moves parsed text from `raw` into `pending`, sending each finished speaker's part.
+  parse() {
+    for (;;) {
+      const marker = this.npc ? "</say>" : "<say";
+      const at = this.raw.indexOf(marker);
+      if (at === -1) {
+        const partial = PARTIAL_TAG.exec(this.raw);
+        const cut = partial ? partial.index : this.raw.length;
+        this.pending += this.raw.slice(0, cut);
+        this.raw = this.raw.slice(cut);
+        return;
+      }
+      this.pending += this.raw.slice(0, at);
+      if (this.npc) {
+        this.raw = this.raw.slice(at + marker.length);
+        this.endSpeaker(null);
+      } else {
+        const close = this.raw.indexOf(">", at);
+        if (close === -1) { this.raw = this.raw.slice(at); return; }  // tag still arriving
+        const attrs = this.raw.slice(at + marker.length, close);
+        this.raw = this.raw.slice(close + 1);
+        this.endSpeaker({ who: sayAttr(attrs, "who"), voice: sayAttr(attrs, "voice") });
+      }
+    }
+  },
+  endSpeaker(next) {
+    if (this.pending.trim()) this.say(this.pending, this.npc);
     this.pending = "";
+    this.npc = next;
+  },
+  flush() {
+    if (!this.silenced) {
+      this.parse();
+      this.pending += this.raw.replace(PARTIAL_TAG, "");
+      if (this.pending.trim()) this.say(this.pending, this.npc);
+    }
+    this.pending = this.raw = "";
+    this.npc = null;
   },
   lastBoundary(text) {
     let end = -1;
@@ -513,7 +580,7 @@ const speaker = {
     while ((m = re.exec(text)) && m.index < 1800) end = m.index + m[0].length;
     return end;
   },
-  say(text) {
+  say(text, npc = null) {
     const clean = plainText(text);
     if (!clean) return;
     this.started = true;
@@ -521,8 +588,14 @@ const speaker = {
     this.queued++;
     // The element starts downloading (streamed) right away, so later chunks are ready by
     // the time earlier ones finish; each plays once everything before it has.
-    const voice = state.voice ? `&voice=${encodeURIComponent(state.voice)}` : "";
-    const el = new Audio(`/api/tts?text=${encodeURIComponent(clean)}${voice}`);
+    const params = new URLSearchParams({ text: clean });
+    if (state.voice) params.set("voice", state.voice);
+    if (npc?.who && state.campaign) {
+      params.set("npc", npc.who);
+      params.set("npc_voice", npc.voice || "");
+      params.set("campaign_id", state.campaign.id);
+    }
+    const el = new Audio(`/api/tts?${params}`);
     el.preload = "auto";
     this.loading.add(el);
     this.queue = this.queue.then(async () => {
@@ -551,7 +624,8 @@ const speaker = {
     this.generation++;
     this.queued = 0;
     this.setSpeaking(false);
-    this.pending = "";
+    this.pending = this.raw = "";
+    this.npc = null;
     if (this.audio) { this.audio.pause(); this.audio.dispatchEvent(new Event("ended")); }
     // Abort downloads of chunks that will never play (each is a TTS request).
     for (const el of this.loading) { el.removeAttribute("src"); el.load(); }
@@ -940,6 +1014,7 @@ async function loadWorldsAdmin() {
     el.innerHTML = `
       <div class="head"><strong>${escapeHtml(w.name)}</strong>
         <span class="meta">${w.characters.length} characters · ${w.lore} lore · ${w.events} events · last activity ${ago(w.last_activity)}</span>
+        <button class="small-button" data-act="voices">NPC voices</button>
         <button class="small-button" data-act="rename">Rename</button>
         <button class="small-button danger" data-act="delete">Delete…</button></div>
       ${w.characters.length ? `<div class="grid-wrap"><table class="grid"><thead><tr>
@@ -949,6 +1024,7 @@ async function loadWorldsAdmin() {
         <td class="num">${c.level}</td><td class="num">${c.hp}/${c.max_hp}${c.temp_hp ? ` +${c.temp_hp}` : ""}</td>
         <td class="num">${c.defense}</td><td class="num">${c.gold}</td><td>${c.status}</td><td>${escapeHtml(c.location || "")}</td>
         <td><button class="small-button" data-char="${c.id}">Edit</button></td></tr>`).join("")}</tbody></table></div>` : ""}`;
+    el.querySelector('[data-act="voices"]').addEventListener("click", () => toggleNpcVoices(el, w));
     el.querySelector('[data-act="rename"]').addEventListener("click", async () => {
       const name = prompt(`Rename “${w.name}” to:`, w.name);
       if (!name || name.trim() === w.name) return;
@@ -964,6 +1040,47 @@ async function loadWorldsAdmin() {
     el.querySelectorAll("[data-char]").forEach((b) => b.addEventListener("click", () =>
       editCharacter(w, w.characters.find((c) => String(c.id) === b.dataset.char))));
     box.append(el);
+  }
+}
+
+// Which voice each NPC in a world speaks with (assigned the first time they talk).
+async function toggleNpcVoices(card, world) {
+  const open = card.querySelector(".npc-voices");
+  if (open) { open.remove(); return; }
+  const box = document.createElement("div");
+  box.className = "npc-voices";
+  box.innerHTML = '<p class="hint">Loading…</p>';
+  card.append(box);
+  try {
+    const [assigned, catalogue] = await Promise.all([
+      (await api(`/api/admin/worlds/${world.id}/npc-voices`)).json(),
+      (await api("/api/voices")).json(),
+    ]);
+    if (!assigned.length) {
+      box.innerHTML = '<p class="hint">No characters have spoken yet. Voices are assigned the first time a character speaks.</p>';
+      return;
+    }
+    const options = catalogue.voices.map((v) => `<option value="${v.id}">${escapeHtml(v.name)} (${escapeHtml([v.accent, v.gender].filter(Boolean).join(", "))})</option>`).join("");
+    box.innerHTML = '<div class="grid-wrap"><table class="grid"><thead><tr><th>Character</th><th>Voice</th><th></th></tr></thead><tbody>' +
+      assigned.map((a) => `<tr><td>${escapeHtml(a.name)}</td><td><select data-npc="${escapeHtml(a.name)}">${options}</select></td>
+        <td><button class="small-button" data-hear="${escapeHtml(a.name)}">▶</button></td></tr>`).join("") + "</tbody></table></div>";
+    for (const select of box.querySelectorAll("select")) {
+      select.value = assigned.find((a) => a.name === select.dataset.npc).voice;
+      select.addEventListener("change", async () => {
+        try { await adminPost(`/api/admin/worlds/${world.id}/npc-voices`, { name: select.dataset.npc, voice: select.value }); toast(`${select.dataset.npc} now speaks with ${select.selectedOptions[0].text}.`); }
+        catch (e) { toast(e.message); }
+      });
+    }
+    for (const b of box.querySelectorAll("[data-hear]")) {
+      b.addEventListener("click", () => {
+        const voiceId = box.querySelector(`select[data-npc="${CSS.escape(b.dataset.hear)}"]`).value;
+        speaker.stop(); speaker.begin();
+        const audio = new Audio(`/api/tts?${new URLSearchParams({ text: `I am ${b.dataset.hear}. What brings you here?`, voice: voiceId })}`);
+        audio.play().catch(() => {});
+      });
+    }
+  } catch (e) {
+    box.innerHTML = `<p class="error">${escapeHtml(e.message)}</p>`;
   }
 }
 

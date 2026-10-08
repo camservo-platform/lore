@@ -132,8 +132,12 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
 
     @server.tool()
     async def end_session(campaign: str, summary: str, ctx: Context) -> dict[str, Any]:
-        """Ends the open session with a recap of what happened (a few sentences)."""
+        """Ends the open session. `summary` is a "previously on..." recap of 3-6 sentences naming the
+        characters, places and unresolved threads; it is also saved as lore (kind history) so later
+        sessions can recall it."""
         st = state(ctx)
+        # Embed outside the transaction: it's a network call to the embedding server.
+        embedding = await st.embedder.embed_document(summary)
         async with st.pool.acquire() as conn, conn.transaction():
             cid = await campaign_id(conn, campaign)
             # Record before closing so the event belongs to the session it ends.
@@ -148,8 +152,19 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
             )
             if session_id is None:
                 raise ToolError("No session is open for this campaign.")
+            number = await conn.fetchval("SELECT count(*) FROM game_sessions WHERE campaign_id = $1", cid)
+            title = f"Session {number} recap"
+            await conn.execute(
+                """
+                INSERT INTO lore_entries (campaign_id, kind, title, content, tags, embedding)
+                VALUES ($1, 'history', $2, $3, ARRAY['session-recap'], $4)
+                ON CONFLICT (campaign_id, kind, (lower(title))) DO UPDATE
+                SET content = EXCLUDED.content, embedding = EXCLUDED.embedding, updated_at = now()
+                """,
+                cid, title, summary, embedding,
+            )
         await st.bus.publish(event)
-        return {"session_id": session_id, "summary": summary}
+        return {"session_id": session_id, "summary": summary, "saved_as_lore": title}
 
     # --- characters --------------------------------------------------------------
 
