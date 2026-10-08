@@ -86,7 +86,7 @@ class WebSettings:
             llm_effort=env.get("LLM_EFFORT", "medium"),
             deepgram_api_key=env.get("DEEPGRAM_API_KEY") or None,
             stt_model=env.get("DEEPGRAM_STT_MODEL", "flux-general-en"),
-            tts_model=env.get("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en"),
+            tts_model=env.get("DEEPGRAM_TTS_MODEL", "aura-2-pandora-en"),
             dev_user=env.get("LORE_DEV_USER") or None,
             admins=frozenset(u.strip() for u in env.get("LORE_ADMINS", "").split(",") if u.strip()),
         )

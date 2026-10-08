@@ -32,6 +32,9 @@ spec:
       labels:
         {{- include "lore.selectorLabels" $ctx | nindent 8 }}
         lore/public: "true"
+      annotations:
+        # Restart when the shared config changes: envFrom is only read at startup.
+        checksum/config: {{ include (print $root.Template.BasePath "/config.yaml") $root | sha256sum }}
     spec:
       {{- include "lore.scheduling" $root.Values.mcp | nindent 6 }}
       {{- with $root.Values.app.imagePullSecrets }}

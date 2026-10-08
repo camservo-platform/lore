@@ -36,7 +36,8 @@ deepgram:
   # Live conversation uses Deepgram Flux (turn detection and interruptions); it must be a
   # Flux model: flux-general-en, or flux-general-multi for other languages.
   sttModel: flux-general-en
-  ttsModel: aura-2-thalia-en
+  # Default Game Master voice; players can pick another in the UI.
+  ttsModel: aura-2-pandora-en
 
 postgres:
   # Official postgres image plus the pgvector extension (enabled by the app's migrations).
