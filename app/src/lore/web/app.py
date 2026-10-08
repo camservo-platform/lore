@@ -461,8 +461,13 @@ def create_app() -> Starlette:
         return sse(events())
 
     async def tts(request: Request) -> Response:
+        """MP3 for `text`, streamed. GET (text in the query) lets an <audio> element start
+        playing as the first bytes arrive instead of after the whole clip is synthesised."""
         user_of(request)
-        text = (await request.json()).get("text", "").strip()
+        if request.method == "GET":
+            text = request.query_params.get("text", "").strip()
+        else:
+            text = (await request.json()).get("text", "").strip()
         if not text:
             raise HTTPException(400, "No text.")
         audio = require_voice().speak(text)
@@ -474,7 +479,7 @@ def create_app() -> Starlette:
             async for chunk in audio:
                 yield chunk
 
-        return StreamingResponse(body(), media_type="audio/mpeg")
+        return StreamingResponse(body(), media_type="audio/mpeg", headers={"Cache-Control": "no-store"})
 
     async def admin_overview(request: Request) -> Response:
         require_admin(request)
@@ -529,7 +534,7 @@ def create_app() -> Starlette:
             Route("/api/campaigns/{campaign_id:int}/reset", reset_table, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/lines", recent_lines),
             Route("/api/campaigns/{campaign_id:int}/feed", feed),
-            Route("/api/tts", tts, methods=["POST"]),
+            Route("/api/tts", tts, methods=["GET", "POST"]),
             Route("/api/voice/ticket", voice_ticket, methods=["POST"]),
             WebSocketRoute("/ws/voice", voice_socket),
             Route("/api/admin/overview", admin_overview),

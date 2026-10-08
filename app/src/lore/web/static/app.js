@@ -376,18 +376,22 @@ const speaker = {
   queued: 0,      // chunks fetched or playing
   speaking: false,
   silenced: false, // stopped by the player: the rest of this reply stays quiet
+  started: false,  // has this reply's first chunk gone out yet
+  loading: new Set(), // audio elements fetched but not finished, aborted on stop
   queue: Promise.resolve(),
   audio: null,
   generation: 0,
   begin() {
     this.pending = "";
     this.silenced = false;
+    this.started = false;
   },
   feed(text) {
     if (this.silenced) return;
     this.pending += text;
     const cut = this.lastBoundary(this.pending);
-    if (cut > 160) {
+    // Get the first sentence out quickly; after that, longer chunks sound more natural.
+    if (cut > (this.started ? 160 : 40)) {
       this.say(this.pending.slice(0, cut));
       this.pending = this.pending.slice(cut);
     }
@@ -406,26 +410,25 @@ const speaker = {
   say(text) {
     const clean = plainText(text);
     if (!clean) return;
+    this.started = true;
     const generation = this.generation;
     this.queued++;
-    // Start fetching now; play once everything queued before it has finished.
-    const audio = api("/api/tts", { method: "POST", body: JSON.stringify({ text: clean }) })
-      .then((r) => r.blob())
-      .catch((e) => { toast(`Speech failed: ${e.message}`); return null; });
+    // The element starts downloading (streamed) right away, so later chunks are ready by
+    // the time earlier ones finish; each plays once everything before it has.
+    const el = new Audio(`/api/tts?text=${encodeURIComponent(clean)}`);
+    el.preload = "auto";
+    this.loading.add(el);
     this.queue = this.queue.then(async () => {
-      const blob = await audio;
-      if (blob && generation === this.generation) await this.play(blob);
+      if (generation === this.generation) await this.play(el);
       if (generation === this.generation && --this.queued === 0) this.setSpeaking(false);
     });
   },
-  play(blob) {
+  play(el) {
     return new Promise((resolve) => {
-      const url = URL.createObjectURL(blob);
-      const el = new Audio(url);
       this.audio = el;
-      const done = () => { URL.revokeObjectURL(url); this.audio = null; resolve(); };
+      const done = () => { this.audio = null; this.loading.delete(el); resolve(); };
       el.onended = done;
-      el.onerror = done;
+      el.onerror = () => { toast("Speech failed for part of the reply."); done(); };
       this.setSpeaking(true);
       el.play().catch(done);
     });
@@ -443,6 +446,9 @@ const speaker = {
     this.setSpeaking(false);
     this.pending = "";
     if (this.audio) { this.audio.pause(); this.audio.dispatchEvent(new Event("ended")); }
+    // Abort downloads of chunks that will never play (each is a TTS request).
+    for (const el of this.loading) { el.removeAttribute("src"); el.load(); }
+    this.loading.clear();
     this.queue = Promise.resolve();
   },
 };
