@@ -20,7 +20,7 @@
 #   secrets.env         DEEPGRAM_API_KEY / LLM_API_KEY, stored in the cluster on deploy
 #   values.local.yaml   site settings layered over values.yaml (ingress host, annotations)
 #
-# Overrides: NAMESPACE, RELEASE, KUBE_CONTEXT, APP_TAG (default: last commit touching app/)
+# Overrides: NAMESPACE, RELEASE, KUBE_CONTEXT, APP_TAG (default: last commit CI built an image for)
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -47,13 +47,15 @@ warn() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 # `|| true`: tr dies of SIGPIPE when head has enough, which pipefail would report as failure.
 rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1" || true; }
 
-# Images are tagged by commit; deploy the newest commit that changed the app.
+# Images are tagged by commit. CI builds commits that touch app/ or its workflow,
+# so deploy the newest such commit.
+APP_PATHS=(../app ../.github/workflows/app.yml)
 app_tag() {
   if [[ -n "${APP_TAG:-}" ]]; then echo "$APP_TAG"; return; fi
-  if [[ -n "$(git status --porcelain -- ../app)" ]]; then
+  if [[ -n "$(git status --porcelain -- "${APP_PATHS[@]}")" ]]; then
     warn "app/ has uncommitted changes; they are not in any image" >&2
   fi
-  git log -1 --format=%H -- ../app
+  git log -1 --format=%H -- "${APP_PATHS[@]}"
 }
 
 helm_args() {

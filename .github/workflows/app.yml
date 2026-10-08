@@ -6,6 +6,7 @@ on:
     paths: ["app/**", ".github/workflows/app.yml"]
   pull_request:
     paths: ["app/**", ".github/workflows/app.yml"]
+  workflow_dispatch:
 
 jobs:
   test:
@@ -29,10 +30,10 @@ jobs:
       - run: uv sync --frozen
       - run: uv run pytest -v
 
-  # Tagged with the commit SHA; deploy.sh deploys the last commit that touched app/.
+  # Tagged with the commit SHA; deploy.sh deploys the last commit that touched app/ or this file.
   image:
     needs: test
-    if: github.event_name == 'push'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     permissions:
       contents: read

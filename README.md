@@ -52,8 +52,9 @@ $EDITOR values.local.yaml              # ingress host + annotations (see below)
 ./deploy.sh status
 ```
 
-`deploy.sh` deploys the image built from the newest commit that touched `app/`, so push
-first and wait for the `app` workflow to finish. Override with `APP_TAG=<sha>`.
+`deploy.sh` deploys the image built from the newest commit that touched `app/` (or the
+`app` workflow), so push first and wait for the workflow to finish. Override with
+`APP_TAG=<sha>`; rebuild any commit with `gh workflow run app`.
 
 Example `values.local.yaml`:
 
