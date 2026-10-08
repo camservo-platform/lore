@@ -104,3 +104,19 @@ async def test_muted_rounds_show_nothing_but_narrate_still_does():
     assert await shown([start("text"), text("I logged that.")], narration=["Earlier."], mute=True) == ""
     events = [start("tool_use", NARRATE), narrate_json("Still heard.")]
     assert await shown(events, narration=["Earlier."], mute=True) == "\n\nStill heard."
+
+
+def test_intro_note_matches_the_table_mode():
+    from lore.gm import intro_note
+    assert "interrupt" in intro_note("speech") and "Type" not in intro_note("speech")
+    assert "Type what your character does" in intro_note("text")
+    assert "starter quest" in intro_note("text")
+
+
+def test_starter_quest_text():
+    from lore.worldgen import starter_quest_text
+    text = starter_quest_text({"title": "Lost Lantern", "giver": "Marta", "goal": "Find the lantern.",
+                               "first_step": "Ask at the docks.", "steps": ["Ask around.", "Search the pier."],
+                               "reward": "Ten gold."})
+    assert text == ("Given by Marta. Goal: Find the lantern. First step: Ask at the docks. "
+                    "Steps: (1) Ask around. (2) Search the pier. Reward: Ten gold.")

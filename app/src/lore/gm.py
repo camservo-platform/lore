@@ -241,6 +241,22 @@ def echo_content(content: list[Any]) -> list[dict[str, Any]]:
     return [b for i, b in enumerate(blocks) if i > boundary or b["type"] not in drop]
 
 
+def intro_note(mode: str) -> str:
+    """Operator note for the very first turn in a freshly created world."""
+    talk = ("Talk to me in your own words: say what your character does or says. Pause and I'll answer; "
+            "you can talk over me any time to interrupt." if mode == "speech" else
+            "Type what your character does or says, in your own words.")
+    return (
+        "This is the players' first moment in a brand-new world, and they may be new to Lore. "
+        "Before the opening scene, welcome them in two or three short, plain sentences on how to play. "
+        f"Cover these, in your own words: {talk} I roll the dice when luck matters (or use the dice tray in the "
+        "sidebar), and the sidebar shows your character's health and inventory. If you're ever unsure, ask me "
+        "what you can do, or ask for a recap. "
+        "Then run the opening scene, which leads into the world's starter quest (search the lore for it), and "
+        "make its goal and first step clear. If a player has no character yet, help them make one quickly first."
+    )
+
+
 def style_note(mode: str) -> str:
     """Operator instruction for a change of table mode."""
     return SPEECH_STYLE if mode == "speech" else TEXT_STYLE

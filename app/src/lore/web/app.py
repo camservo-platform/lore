@@ -38,7 +38,8 @@ from lore.db import create_pool
 from lore.embeddings import OllamaEmbedder
 from lore.events import stream_key
 from lore.gm import (
-    GameMaster, Toolbox, ToolCallError, instructions_version, style_note, system_prompt, updated_instructions,
+    GameMaster, Toolbox, ToolCallError, instructions_version, intro_note, style_note, system_prompt,
+    updated_instructions,
 )
 from lore.settings import Settings
 from lore.events import EventBus
@@ -472,17 +473,17 @@ def create_app(drain: Drain | None = None) -> Starlette:
 
     async def play_turn(
         table: Table, turn_id: str, campaign: str, user: str, said: str, mode: str,
-        emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None = None,
+        emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None = None, intro: bool = False,
     ) -> None:
         """Runs one GM turn under an already-acquired lock, streaming events to `emit`.
         `said` is what the player said (shown in their lines); `note` is extra context
         for the GM only, such as that they interrupted. A deploy waits for it to finish."""
         with drain.hold():
-            await _play_turn(table, turn_id, campaign, user, said, mode, emit, note)
+            await _play_turn(table, turn_id, campaign, user, said, mode, emit, note, intro)
 
     async def _play_turn(
         table: Table, turn_id: str, campaign: str, user: str, said: str, mode: str,
-        emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None,
+        emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None, intro: bool,
     ) -> None:
         text = said or KICKOFF
         if note:
@@ -504,6 +505,9 @@ def create_app(drain: Drain | None = None) -> Starlette:
             version = current
         if mode != saved["mode"]:
             notes.append(style_note(mode))
+        if intro and len(messages) == 1:
+            # The first turn in a world just forged: a short how-to-play, then its starter quest.
+            notes.append(intro_note(mode))
         if notes:
             messages.append({"role": "system", "content": "\n\n".join(notes)})
         reply = ""
@@ -563,7 +567,13 @@ def create_app(drain: Drain | None = None) -> Starlette:
         async def run() -> None:
             try:
                 await play_turn(table, turn_id, body["campaign"], user, (body.get("message") or "").strip(), mode,
-                                queue.put)
+                                queue.put, intro=bool(body.get("intro")))
+            except Exception as e:
+                # Failures inside the GM loop are reported there; this catches the rest so the
+                # player sees an error instead of a reply that silently never comes.
+                log.exception("turn crashed")
+                await queue.put({"type": "error", "text": describe_error(e)})
+                await redis.delete(table.lock)
             finally:
                 await queue.put(None)
 

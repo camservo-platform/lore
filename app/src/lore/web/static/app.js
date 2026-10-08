@@ -230,7 +230,7 @@ async function enterCampaign(campaign, fresh) {
   const lines = fresh ? [] : await recentLines(campaign);
   await refreshState();
   if (fresh) {
-    takeTurn("");  // the GM opens the first scene
+    takeTurn("", { intro: true });  // a quick how-to-play, then the opening scene and starter quest
   } else if (lines.length) {
     for (const line of lines) addMessage(line.role, line.text, line.role === "player" ? state.user : undefined);
   } else {
@@ -283,7 +283,7 @@ function setBusy(busy) {
   $("send").disabled = busy;
 }
 
-async function takeTurn(message) {
+async function takeTurn(message, { intro = false } = {}) {
   if (state.busy || !state.campaign) return;
   setBusy(true);
   if (message) addMessage("player", message, state.user);
@@ -295,7 +295,7 @@ async function takeTurn(message) {
   speaker.begin();
   try {
     await retryWhileRestarting(() => postStream(`/api/campaigns/${state.campaign.id}/turn`,
-      { campaign: state.campaign.name, message, mode: state.mode },
+      { campaign: state.campaign.name, message, mode: state.mode, intro },
       (ev) => {
         if (ev.type === "turn") state.myTurns.add(ev.id);
         else if (ev.type === "text") {
