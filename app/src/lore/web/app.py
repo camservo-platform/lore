@@ -28,10 +28,13 @@ from starlette.responses import FileResponse, JSONResponse, Response, StreamingR
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from lore import worldgen
+from lore import admin, worldgen
+from lore.db import create_pool
+from lore.embeddings import OllamaEmbedder
 from lore.events import stream_key
 from lore.gm import GameMaster, Toolbox, ToolCallError, style_message
 from lore.mcp.common import USER_HEADER
+from lore.settings import Settings
 from lore.voice import Voice
 
 log = logging.getLogger(__name__)
@@ -55,6 +58,7 @@ class WebSettings:
     stt_model: str
     tts_model: str
     dev_user: str | None
+    admins: frozenset[str]
 
     @classmethod
     def from_env(cls) -> "WebSettings":
@@ -73,6 +77,7 @@ class WebSettings:
             stt_model=env.get("DEEPGRAM_STT_MODEL", "nova-3"),
             tts_model=env.get("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en"),
             dev_user=env.get("LORE_DEV_USER") or None,
+            admins=frozenset(u.strip() for u in env.get("LORE_ADMINS", "").split(",") if u.strip()),
         )
 
 
@@ -123,6 +128,8 @@ def sse(events: AsyncIterator[dict[str, Any]]) -> StreamingResponse:
 
 
 def create_app() -> Starlette:
+    # Here rather than in __main__: with reload, the app runs in a child process.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     settings = WebSettings.from_env()
     redis = Redis(
         host=settings.redis_host, port=settings.redis_port, password=settings.redis_password, decode_responses=True
@@ -135,11 +142,27 @@ def create_app() -> Starlette:
     )
     # Turns run as tasks so a dropped connection can't cut one off half-applied.
     background: set[asyncio.Task] = set()
+    # Admin tools talk to Postgres and the embedding server directly; connect on first use.
+    admin_db: dict[str, Any] = {}
+    admin_db_lock = asyncio.Lock()
+
+    async def admin_backend() -> tuple[Any, OllamaEmbedder]:
+        async with admin_db_lock:
+            if not admin_db:
+                admin_db["pool"] = await create_pool(min_size=0, max_size=3)
+                admin_db["embedder"] = OllamaEmbedder(Settings.from_env())
+        return admin_db["pool"], admin_db["embedder"]
 
     def user_of(request: Request) -> str:
         user = request.headers.get(USER_HEADER) or settings.dev_user
         if not user:
             raise HTTPException(401, "Not signed in.")
+        return user
+
+    def require_admin(request: Request) -> str:
+        user = user_of(request)
+        if user not in settings.admins:
+            raise HTTPException(403, "Admins only.")
         return user
 
     def require_voice() -> Voice:
@@ -154,7 +177,8 @@ def create_app() -> Starlette:
         return JSONResponse({"status": "ok"})
 
     async def me(request: Request) -> Response:
-        return JSONResponse({"user": user_of(request), "speech": voice is not None})
+        user = user_of(request)
+        return JSONResponse({"user": user, "speech": voice is not None, "admin": user in settings.admins})
 
     async def campaigns(request: Request) -> Response:
         async with toolbox.session(user_of(request)) as tools:
@@ -281,6 +305,34 @@ def create_app() -> Starlette:
 
         return StreamingResponse(body(), media_type="audio/mpeg")
 
+    async def admin_overview(request: Request) -> Response:
+        require_admin(request)
+        pool, _ = await admin_backend()
+        return JSONResponse(await admin.overview(pool))
+
+    async def admin_sql(request: Request) -> Response:
+        user = require_admin(request)
+        body = await request.json()
+        sql, allow_writes = body.get("sql", ""), bool(body.get("allow_writes"))
+        log.info("admin %s ran SQL (writes=%s): %s", user, allow_writes, " ".join(sql.split())[:1000])
+        pool, _ = await admin_backend()
+        return JSONResponse(await admin.run_sql(pool, sql, allow_writes=allow_writes))
+
+    async def admin_vector(request: Request) -> Response:
+        require_admin(request)
+        body = await request.json()
+        query = (body.get("query") or "").strip()
+        if not query:
+            raise HTTPException(400, "Enter something to search for.")
+        pool, embedder = await admin_backend()
+        hits = await admin.vector_search(
+            pool, embedder, query,
+            campaign_id=int(body["campaign_id"]) if body.get("campaign_id") else None,
+            kind=body.get("kind") or None,
+            limit=int(body.get("limit") or 10),
+        )
+        return JSONResponse(hits)
+
     @asynccontextmanager
     async def lifespan(_app):
         yield
@@ -288,6 +340,9 @@ def create_app() -> Starlette:
             task.cancel()
         if voice:
             await voice.aclose()
+        if admin_db:
+            await admin_db["embedder"].aclose()
+            await admin_db["pool"].close()
         await llm.close()
         await redis.aclose()
 
@@ -304,6 +359,9 @@ def create_app() -> Starlette:
             Route("/api/campaigns/{campaign_id:int}/feed", feed),
             Route("/api/stt", stt, methods=["POST"]),
             Route("/api/tts", tts, methods=["POST"]),
+            Route("/api/admin/overview", admin_overview),
+            Route("/api/admin/sql", admin_sql, methods=["POST"]),
+            Route("/api/admin/vector", admin_vector, methods=["POST"]),
             Mount("/static", StaticFiles(directory=STATIC), name="static"),
         ],
         lifespan=lifespan,

@@ -46,6 +46,8 @@ spec:
             - configMapRef:
                 name: {{ include "lore.fullname" . }}-config
           env:
+            # The admin view queries Postgres directly.
+            {{- include "lore.secretEnv" (list . "PGPASSWORD" "postgres-password") | nindent 12 }}
             {{- include "lore.secretEnv" (list . "REDIS_PASSWORD" "redis-password") | nindent 12 }}
             {{- include "lore.secretEnv" (list . "LLM_API_KEY" "llm-api-key") | nindent 12 }}
             # Optional: without it the UI offers text mode only.

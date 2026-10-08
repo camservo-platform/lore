@@ -152,6 +152,57 @@ form#forge label { display: grid; gap: 4px; font-weight: 500; }
   width: 100%; background: none; border: 1px solid var(--line); border-radius: 8px; padding: 7px; cursor: pointer; color: var(--muted);
 }
 
+/* admin */
+.admin-link {
+  background: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; cursor: pointer; color: var(--muted); font-weight: 500;
+}
+.admin-link[aria-current="page"] { border-color: var(--accent); color: var(--accent); }
+.admin {
+  flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px;
+  padding: 20px; max-width: 1400px; width: 100%; margin: 0 auto;
+}
+.admin-main { display: flex; flex-direction: column; gap: 12px; min-width: 0; min-height: 0; }
+.admin-main .panel { display: flex; flex-direction: column; gap: 12px; min-height: 0; overflow: auto; }
+.tabs { display: flex; gap: 4px; }
+.tabs button {
+  border: 1px solid var(--line); background: var(--surface-2); border-radius: 8px 8px 0 0; padding: 6px 16px; cursor: pointer; color: var(--muted); font-weight: 500;
+}
+.tabs button[aria-selected="true"] { background: var(--surface); color: var(--ink); border-bottom-color: var(--surface); }
+#sql { font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.row { display: flex; gap: 10px; align-items: center; }
+.row.wrap { flex-wrap: wrap; }
+.row .hint { flex: 1; margin: 0; font-size: 12px; }
+.row input { flex: 1 1 260px; width: auto; }
+select { background: var(--bg); border: 1px solid var(--line); border-radius: 8px; padding: 8px; font: inherit; color: inherit; }
+.check { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; white-space: nowrap; }
+.check input { width: auto; }
+.examples { display: flex; flex-wrap: wrap; gap: 6px; }
+.examples button {
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; font-size: 12px; cursor: pointer; color: var(--muted);
+}
+.result .status { color: var(--muted); font-size: 12px; margin-bottom: 6px; }
+.result .error { color: var(--bad); white-space: pre-wrap; font: 13px/1.5 ui-monospace, Menlo, monospace; }
+.grid-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--line); border-radius: 8px; }
+table.grid { border-collapse: collapse; font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace; min-width: 100%; }
+table.grid th, table.grid td { padding: 5px 9px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+table.grid th { position: sticky; top: 0; background: var(--surface-2); font-weight: 600; }
+table.grid td { max-width: 36rem; white-space: pre-wrap; word-break: break-word; }
+table.grid td.null { color: var(--muted); font-style: italic; }
+.hits { list-style: none; margin: 0; padding: 0; display: grid; gap: 10px; }
+.hits li { border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--bg); }
+.hits .head { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+.hits .title { font: 700 18px/1.2 var(--serif); }
+.hits .meta { color: var(--muted); font-size: 12px; }
+.hits .score { margin-left: auto; font: 600 12px ui-monospace, Menlo, monospace; }
+.hits .bar { height: 4px; background: var(--surface-2); border-radius: 2px; margin: 6px 0; overflow: hidden; }
+.hits .bar > div { height: 100%; background: var(--accent); }
+.hits p { margin: 0; font-size: 14px; }
+.schema { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; font-size: 13px; }
+.schema details summary { cursor: pointer; font-weight: 600; }
+.schema details summary span { color: var(--muted); font-weight: 400; }
+.schema code { display: block; font: 12px/1.6 ui-monospace, Menlo, monospace; color: var(--muted); padding-left: 12px; }
+.schema li.meta { color: var(--muted); }
+
 .toast {
   position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%); max-width: calc(100% - 32px);
   background: var(--ink); color: var(--bg); padding: 10px 16px; border-radius: 8px; box-shadow: var(--shadow); z-index: 10;
@@ -163,4 +214,6 @@ form#forge label { display: grid; gap: 4px; font-weight: 500; }
   .lobby { padding: 16px; }
   .table { grid-template-columns: 1fr; padding: 12px 16px; }
   .sidebar { max-height: 30vh; }
+  .admin { grid-template-columns: 1fr; padding: 12px 16px; }
+  .row:not(.wrap) { flex-wrap: wrap; }
 }

@@ -11,4 +11,4 @@ async def _init_connection(conn: asyncpg.Connection) -> None:
 
 async def create_pool(dsn: str | None = None, **kwargs) -> asyncpg.Pool:
     """Connection pool with jsonb and vector codecs. With no dsn, asyncpg uses the PG* env vars."""
-    return await asyncpg.create_pool(dsn, init=_init_connection, min_size=1, max_size=10, **kwargs)
+    return await asyncpg.create_pool(dsn, init=_init_connection, **{"min_size": 1, "max_size": 10} | kwargs)

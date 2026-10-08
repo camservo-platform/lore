@@ -136,6 +136,9 @@ mcp:
 # so replicas can be added freely.
 web:
   replicas: 1
+  # Usernames (ingress logins) allowed into the admin view, which can run SQL against
+  # the game database and search the lore vectors directly. Set in values.local.yaml.
+  admins: []
   nodeSelector: {}
   tolerations: []
   resources:

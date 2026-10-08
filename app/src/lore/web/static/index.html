@@ -18,6 +18,7 @@
         <button role="radio" data-mode="text" aria-checked="true">Text</button>
         <button role="radio" data-mode="speech" aria-checked="false">Speech</button>
       </div>
+      <button class="admin-link" id="admin-link" hidden>Admin</button>
       <span class="user" id="user"></span>
     </div>
   </header>
@@ -31,15 +32,15 @@
 
     <section class="panel">
       <h2>Forge a new world</h2>
-      <p class="hint">Describe the world you want to play in. The Game Master writes its places, people and plots, then opens the first scene.</p>
+      <p class="hint">Describe the world you want to play in, or leave it blank and the Game Master will invent one. It writes the places, people and plots, then opens the first scene.</p>
       <form id="forge">
-        <label>Theme
-          <textarea name="theme" rows="4" placeholder="A drowned archipelago where lighthouse keepers guard the last dry land, and something below the waves is waking."></textarea>
+        <label>Theme <span class="optional">(optional)</span>
+          <textarea name="theme" rows="4" placeholder="Leave blank for a surprise, or e.g. “a drowned archipelago where lighthouse keepers guard the last dry land, and something below the waves is waking”"></textarea>
         </label>
         <label>Name <span class="optional">(optional)</span>
           <input name="name" maxlength="60" placeholder="Leave blank to let the Game Master choose">
         </label>
-        <button type="submit" class="primary">Forge world</button>
+        <button type="submit" class="primary" id="forge-button">Surprise me</button>
       </form>
       <ol class="progress" id="forge-progress" hidden></ol>
     </section>
@@ -73,6 +74,54 @@
       </section>
       <section class="table-actions">
         <button id="new-session" title="Clear the Game Master's memory of this conversation. The world, characters and chronicle are kept.">New conversation</button>
+      </section>
+    </aside>
+  </main>
+
+  <main id="admin" class="admin" hidden>
+    <div class="admin-main">
+      <div class="tabs" role="tablist">
+        <button role="tab" data-tab="sql" aria-selected="true">SQL</button>
+        <button role="tab" data-tab="vector" aria-selected="false">Vector search</button>
+      </div>
+
+      <section class="panel" id="tab-sql">
+        <form id="sql-form">
+          <textarea id="sql" rows="6" spellcheck="false" placeholder="SELECT name, setting FROM campaigns ORDER BY created_at DESC"></textarea>
+          <div class="row">
+            <label class="check"><input type="checkbox" id="allow-writes"> Allow writes</label>
+            <span class="hint">Read-only unless ticked · 15 s timeout · first 500 rows · ⌘/Ctrl+Enter runs</span>
+            <button type="submit" class="primary">Run</button>
+          </div>
+        </form>
+        <div class="examples" id="sql-examples"></div>
+        <div class="result" id="sql-result"></div>
+      </section>
+
+      <section class="panel" id="tab-vector" hidden>
+        <form id="vector-form" class="row wrap">
+          <input id="vector-query" placeholder="Search lore by meaning, e.g. who controls the river crossings?">
+          <select id="vector-campaign"><option value="">All campaigns</option></select>
+          <select id="vector-kind">
+            <option value="">Any kind</option>
+            <option>location</option><option>npc</option><option>faction</option><option>item</option>
+            <option>history</option><option>storyline</option><option>rumor</option><option>other</option>
+          </select>
+          <select id="vector-limit"><option>5</option><option selected>10</option><option>25</option><option>50</option></select>
+          <button type="submit" class="primary">Search</button>
+        </form>
+        <ol class="hits" id="vector-result"></ol>
+      </section>
+    </div>
+
+    <aside class="sidebar admin-side">
+      <section>
+        <h3>Tables</h3>
+        <ul class="schema" id="schema"></ul>
+      </section>
+      <section>
+        <h3>Lore vectors</h3>
+        <ul class="schema" id="lore-stats"></ul>
       </section>
     </aside>
   </main>

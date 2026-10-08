@@ -27,5 +27,6 @@ data:
   LLM_PROVIDER: {{ .Values.llm.provider | quote }}
   LLM_MODEL: {{ .Values.llm.model | quote }}
   LLM_EFFORT: {{ .Values.llm.effort | quote }}
+  LORE_ADMINS: {{ join "," .Values.web.admins | quote }}
   DEEPGRAM_STT_MODEL: {{ .Values.deepgram.sttModel | quote }}
   DEEPGRAM_TTS_MODEL: {{ .Values.deepgram.ttsModel | quote }}

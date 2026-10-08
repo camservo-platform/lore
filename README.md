@@ -130,10 +130,10 @@ they come from speech.
 
 Open `https://<host>/` and sign in.
 
-- **Your worlds** lists existing campaigns; **Forge a new world** takes a theme (and an
-  optional name), has Claude write the setting, an opening scene and 12-16 linked lore
-  entries, records them through the MCP servers, and drops you into the first scene
-  (about a minute).
+- **Your worlds** lists existing campaigns; **Forge a new world** takes an optional theme
+  and name (leave both blank and the Game Master invents an original world), has Claude
+  write the setting, an opening scene and 12-16 linked lore entries, records them through
+  the MCP servers, and drops you into the first scene (about a minute).
 - **Text / Speech** (top right, remembered per browser). Speech mode records with the
   mic button or by holding the space bar, transcribes with Deepgram, and reads the Game
   Master's reply aloud sentence by sentence as it streams. The GM is told which mode the
@@ -151,6 +151,22 @@ server-side `fallbacks: "default"`, so a declined request is retried on another 
 
 The GM's thinking depth is `llm.effort` in `values.yaml` (`medium`); lower it for
 snappier voice play.
+
+## Admin view
+
+Users listed in `web.admins` (set it in `values.local.yaml`, e.g. `admins: [alice]`) get
+an **Admin** button with:
+
+- **SQL**: runs one statement against the game database. Read-only unless **Allow
+  writes** is ticked; 15 s statement timeout; the first 500 rows are shown; embeddings
+  display as a short preview. Example queries and a schema browser (double-click a table
+  to select from it) are built in. Every query is logged with the admin's username
+  (`./deploy.sh logs web`).
+- **Vector search**: semantic search over all lore (or one campaign / kind), with cosine
+  similarity scores, using the same embedding model as the lore server.
+
+Non-admins get 403 from the admin API. The web pod connects to Postgres directly for
+this, as the app's database user.
 
 ## Event log and Redis
 

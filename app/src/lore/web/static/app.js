@@ -4,6 +4,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   user: null,
   speechAvailable: false,
+  admin: false,
   mode: "text",
   campaign: null,      // {id, name, setting}
   busy: false,
@@ -95,12 +96,16 @@ document.querySelectorAll(".mode button").forEach((b) => b.addEventListener("cli
 
 // ---------- lobby ---------------------------------------------------------------------
 
+function showView(name) {
+  for (const view of ["lobby", "table", "admin"]) $(view).hidden = view !== name;
+  $("admin-link").setAttribute("aria-current", name === "admin" ? "page" : "false");
+}
+
 async function showLobby() {
   closeFeed();
   speaker.stop();
   state.campaign = null;
-  $("table").hidden = true;
-  $("lobby").hidden = false;
+  showView("lobby");
   $("campaign-title").textContent = "";
   history.replaceState(null, "", "/");
   const list = $("worlds");
@@ -120,6 +125,11 @@ async function showLobby() {
 }
 
 $("home").addEventListener("click", showLobby);
+
+// The button says what will happen: a themed world, or one the GM invents.
+$("forge").theme.addEventListener("input", (e) => {
+  $("forge-button").textContent = e.target.value.trim() ? "Forge world" : "Surprise me";
+});
 
 $("forge").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -150,6 +160,7 @@ $("forge").addEventListener("submit", async (e) => {
   }
   if (campaign) {
     form.reset();
+    $("forge-button").textContent = "Surprise me";
     progress.hidden = true;
     enterCampaign(campaign, true);
   }
@@ -159,8 +170,7 @@ $("forge").addEventListener("submit", async (e) => {
 
 async function enterCampaign(campaign, fresh) {
   state.campaign = campaign;
-  $("lobby").hidden = true;
-  $("table").hidden = false;
+  showView("table");
   $("campaign-title").textContent = campaign.name;
   $("transcript").innerHTML = "";
   history.replaceState(null, "", `/?campaign=${campaign.id}`);
@@ -459,6 +469,157 @@ document.addEventListener("keyup", (e) => {
   }
 });
 
+// ---------- admin ---------------------------------------------------------------------
+
+const SQL_EXAMPLES = {
+  "Campaigns": "SELECT id, name, created_at, left(setting, 80) AS setting FROM campaigns ORDER BY created_at DESC",
+  "Characters": "SELECT c.name AS campaign, ch.name, p.username AS player, ch.hp, ch.max_hp, ch.status, ch.location\nFROM characters ch JOIN campaigns c ON c.id = ch.campaign_id LEFT JOIN players p ON p.id = ch.player_id\nORDER BY c.name, ch.name",
+  "Recent events": "SELECT e.id, c.name AS campaign, e.actor, e.type, e.summary, e.occurred_at\nFROM events e JOIN campaigns c ON c.id = e.campaign_id ORDER BY e.id DESC LIMIT 50",
+  "Lore": "SELECT c.name AS campaign, l.kind, l.title, l.tags, left(l.content, 120) AS content\nFROM lore_entries l JOIN campaigns c ON c.id = l.campaign_id ORDER BY c.name, l.kind, l.title",
+  "Nearest lore pairs": "SELECT a.title, b.title AS nearest, round((1 - (a.embedding <=> b.embedding))::numeric, 3) AS similarity\nFROM lore_entries a JOIN LATERAL (\n  SELECT title, embedding FROM lore_entries b\n  WHERE b.campaign_id = a.campaign_id AND b.id <> a.id ORDER BY a.embedding <=> b.embedding LIMIT 1\n) b ON true ORDER BY similarity DESC",
+  "Sessions": "SELECT s.id, c.name AS campaign, s.started_at, s.ended_at, s.summary\nFROM game_sessions s JOIN campaigns c ON c.id = s.campaign_id ORDER BY s.started_at DESC",
+};
+
+async function showAdmin() {
+  closeFeed();
+  speaker.stop();
+  state.campaign = null;
+  showView("admin");
+  $("campaign-title").textContent = "Admin";
+  history.replaceState(null, "", "/?admin");
+  try {
+    const data = await (await api("/api/admin/overview")).json();
+    renderSchema(data.tables);
+    renderLoreStats(data.lore);
+  } catch (e) {
+    toast(`Couldn't load the schema: ${e.message}`);
+  }
+}
+
+$("admin-link").addEventListener("click", showAdmin);
+
+document.querySelectorAll(".tabs button").forEach((tab) =>
+  tab.addEventListener("click", () => {
+    document.querySelectorAll(".tabs button").forEach((t) => t.setAttribute("aria-selected", String(t === tab)));
+    $("tab-sql").hidden = tab.dataset.tab !== "sql";
+    $("tab-vector").hidden = tab.dataset.tab !== "vector";
+  }));
+
+for (const [label, sql] of Object.entries(SQL_EXAMPLES)) {
+  const b = document.createElement("button");
+  b.type = "button";
+  b.textContent = label;
+  b.addEventListener("click", () => { $("sql").value = sql; $("sql-form").requestSubmit(); });
+  $("sql-examples").append(b);
+}
+
+function renderSchema(tables) {
+  const list = $("schema");
+  list.innerHTML = "";
+  for (const t of tables) {
+    const li = document.createElement("li");
+    li.innerHTML = `<details><summary>${escapeHtml(t.name)} <span>${t.rows ?? "?"} rows</span></summary>${
+      t.columns.map((c) => `<code>${escapeHtml(c.name)} · ${escapeHtml(c.type)}</code>`).join("")}</details>`;
+    li.querySelector("summary").addEventListener("dblclick", () => {
+      $("sql").value = `SELECT * FROM ${t.name} LIMIT 100`;
+      $("sql-form").requestSubmit();
+    });
+    list.append(li);
+  }
+}
+
+function renderLoreStats(rows) {
+  const list = $("lore-stats");
+  const select = $("vector-campaign");
+  list.innerHTML = rows.length ? "" : '<li class="meta">No lore yet.</li>';
+  select.length = 1;
+  const byCampaign = new Map();
+  for (const r of rows) {
+    if (!byCampaign.has(r.campaign_id)) byCampaign.set(r.campaign_id, { name: r.campaign, kinds: [] });
+    byCampaign.get(r.campaign_id).kinds.push(`${r.kind} ${r.entries}`);
+  }
+  for (const [id, c] of byCampaign) {
+    const li = document.createElement("li");
+    li.innerHTML = `<strong>${escapeHtml(c.name)}</strong><code>${escapeHtml(c.kinds.join(" · "))}</code>`;
+    list.append(li);
+    select.add(new Option(c.name, id));
+  }
+}
+
+$("sql").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+    e.preventDefault();
+    $("sql-form").requestSubmit();
+  }
+});
+
+$("allow-writes").addEventListener("change", (e) => {
+  if (e.target.checked && !confirm("Allow this console to change data? Writes take effect immediately and can't be undone.")) {
+    e.target.checked = false;
+  }
+});
+
+$("sql-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const out = $("sql-result");
+  const button = e.target.querySelector("button[type=submit]");
+  button.disabled = true;
+  out.innerHTML = '<div class="status">Running…</div>';
+  try {
+    const r = await (await api("/api/admin/sql", {
+      method: "POST", body: JSON.stringify({ sql: $("sql").value, allow_writes: $("allow-writes").checked }),
+    })).json();
+    if (r.error) {
+      out.innerHTML = `<div class="error">${escapeHtml(r.error)}</div>`;
+      return;
+    }
+    let html = `<div class="status">${escapeHtml(r.status || "")}${r.truncated ? " · showing the first 500 rows" : ""}${r.wrote ? " · writes allowed" : ""}</div>`;
+    if (r.columns.length) {
+      html += '<div class="grid-wrap"><table class="grid"><thead><tr>' +
+        r.columns.map((c) => `<th>${escapeHtml(c)}</th>`).join("") + "</tr></thead><tbody>" +
+        r.rows.map((row) => "<tr>" + row.map((v) => v === null
+          ? '<td class="null">null</td>'
+          : `<td>${escapeHtml(typeof v === "object" ? JSON.stringify(v) : String(v))}</td>`).join("") + "</tr>").join("") +
+        "</tbody></table></div>";
+    }
+    out.innerHTML = html;
+    if (r.wrote) showAdmin();  // row counts may have changed
+  } catch (err) {
+    out.innerHTML = `<div class="error">${escapeHtml(err.message)}</div>`;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("vector-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const out = $("vector-result");
+  out.innerHTML = '<li class="meta">Searching…</li>';
+  try {
+    const hits = await (await api("/api/admin/vector", {
+      method: "POST",
+      body: JSON.stringify({
+        query: $("vector-query").value, campaign_id: $("vector-campaign").value,
+        kind: $("vector-kind").value, limit: $("vector-limit").value,
+      }),
+    })).json();
+    out.innerHTML = hits.length ? "" : '<li class="meta">No lore matches those filters.</li>';
+    for (const h of hits) {
+      const li = document.createElement("li");
+      const pct = Math.max(0, Math.min(100, h.similarity * 100));
+      li.innerHTML = `
+        <div class="head"><span class="title">${escapeHtml(h.title)}</span>
+          <span class="meta">${escapeHtml(h.kind)} · ${escapeHtml(h.campaign)}${h.tags.length ? " · " + escapeHtml(h.tags.join(", ")) : ""}</span>
+          <span class="score">${h.similarity.toFixed(3)}</span></div>
+        <div class="bar"><div style="width:${pct}%"></div></div>
+        <p>${escapeHtml(h.content)}</p>`;
+      out.append(li);
+    }
+  } catch (err) {
+    out.innerHTML = `<li class="meta">${escapeHtml(err.message)}</li>`;
+  }
+});
+
 // ---------- start ---------------------------------------------------------------------
 
 (async function init() {
@@ -466,7 +627,9 @@ document.addEventListener("keyup", (e) => {
     const me = await (await api("/api/me")).json();
     state.user = me.user;
     state.speechAvailable = me.speech;
+    state.admin = me.admin;
     $("user").textContent = me.user;
+    $("admin-link").hidden = !me.admin;
   } catch (e) {
     toast(e.message);
   }
@@ -479,7 +642,9 @@ document.addEventListener("keyup", (e) => {
   try { saved = localStorage.getItem("lore.mode") || "text"; } catch {}
   setMode(saved);
 
-  const wanted = Number(new URLSearchParams(location.search).get("campaign"));
+  const params = new URLSearchParams(location.search);
+  const wanted = Number(params.get("campaign"));
+  if (params.has("admin") && state.admin) return showAdmin();
   await showLobby();
   if (wanted) {
     const campaigns = await (await api("/api/campaigns")).json();

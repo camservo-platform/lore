@@ -41,7 +41,7 @@ WORLD_SCHEMA = {
 PROMPT = """\
 Create a new world for a tabletop role-playing campaign.
 
-Player's request: {theme}
+{request}
 {name_line}
 Write between 12 and 16 lore entries that give a Game Master enough to improvise from:
 the starting town or region and 2-3 nearby locations, 4-5 named non-player characters
@@ -52,7 +52,7 @@ keywords (places, factions, themes).
 
 Use your own invented names and generic fantasy terminology; never draw on commercial
 games, their settings, trademarked creatures or rules.
-Do not reuse any of these existing campaign names: {existing}"""
+Do not reuse any of these existing campaign names, and make the world unlike theirs: {existing}"""
 
 
 async def generate(
@@ -67,7 +67,9 @@ async def generate(
         messages=[{
             "role": "user",
             "content": PROMPT.format(
-                theme=theme.strip() or "Surprise me.",
+                request=(f"Player's request: {theme.strip()}" if theme.strip() else
+                         "The players left the theme to you: invent an original premise with a distinctive "
+                         "hook, tone and central tension, rather than a generic fantasy kingdom."),
                 name_line=f"Name the campaign exactly: {name}\n" if name else "",
                 existing=", ".join(existing) or "(none)",
             ),
