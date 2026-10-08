@@ -1,0 +1,50 @@
+{{- with .Values.ingress }}
+{{- if .host }}
+{{- $ctx := dict "ctx" $ "component" "ingress" }}
+# Basic auth in front of everything public. Traefik replaces any client-sent
+# X-Lore-User with the authenticated username and strips the credentials.
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ include "lore.fullname" $ }}-auth
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  basicAuth:
+    secret: {{ $.Values.usersSecret }}
+    realm: lore
+    headerField: X-Lore-User
+    removeHeader: true
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "lore.fullname" $ }}
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+  annotations:
+    traefik.ingress.kubernetes.io/router.middlewares: {{ $.Release.Namespace }}-{{ include "lore.fullname" $ }}-auth@kubernetescrd
+    {{- with .annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  ingressClassName: {{ .className }}
+  rules:
+    - host: {{ .host }}
+      http:
+        paths:
+          {{- range $name, $server := $.Values.mcp.servers }}
+          - path: {{ $server.path }}
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "lore.fullname" $ }}-mcp-{{ $name }}
+                port:
+                  name: http
+          {{- end }}
+  tls:
+    - hosts:
+        - {{ .host }}
+      secretName: {{ .tlsSecretName }}
+{{- end }}
+{{- end }}

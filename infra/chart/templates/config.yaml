@@ -14,10 +14,16 @@ data:
   PGPORT: "5432"
   PGDATABASE: {{ .Values.postgres.database | quote }}
   PGUSER: {{ .Values.postgres.user | quote }}
-  QDRANT_URL: {{ include "lore.qdrantUrl" . | quote }}
+  REDIS_HOST: {{ include "lore.redisHost" . | quote }}
+  REDIS_PORT: "6379"
   EMBEDDINGS_URL: {{ include "lore.embeddingsUrl" . | quote }}
   EMBEDDINGS_MODEL: {{ .Values.embeddings.model | quote }}
   EMBEDDINGS_DIMENSIONS: {{ .Values.embeddings.dimensions | quote }}
+  EMBEDDINGS_DOCUMENT_PREFIX: {{ .Values.embeddings.documentPrefix | quote }}
+  EMBEDDINGS_QUERY_PREFIX: {{ .Values.embeddings.queryPrefix | quote }}
+  {{- range $name, $_ := .Values.mcp.servers }}
+  MCP_{{ upper $name }}_URL: {{ include "lore.mcpUrl" (list $ $name) | quote }}
+  {{- end }}
   LLM_PROVIDER: {{ .Values.llm.provider | quote }}
   LLM_MODEL: {{ .Values.llm.model | quote }}
   DEEPGRAM_STT_MODEL: {{ .Values.deepgram.sttModel | quote }}

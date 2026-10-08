@@ -1,5 +1,5 @@
 {{- if .Values.networkPolicy.enabled }}
-{{- range $component := list "postgres" "qdrant" "embeddings" }}
+{{- range $component := list "postgres" "redis" "embeddings" }}
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -17,4 +17,27 @@ spec:
     - from:
         - podSelector: {}
 {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "lore.fullname" . }}-mcp
+  labels:
+    {{- include "lore.labels" (dict "ctx" . "component" "mcp") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      lore/mcp: "true"
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector: {}
+        {{- with .Values.networkPolicy.ingressController }}
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .namespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml .podLabels | nindent 14 }}
+        {{- end }}
 {{- end }}

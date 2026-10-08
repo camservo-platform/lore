@@ -41,8 +41,18 @@ tolerations:
 {{ include "lore.fullname" . }}-postgres.{{ .Release.Namespace }}.svc.cluster.local
 {{- end -}}
 
-{{- define "lore.qdrantUrl" -}}
-http://{{ include "lore.fullname" . }}-qdrant.{{ .Release.Namespace }}.svc.cluster.local:6333
+{{- define "lore.redisHost" -}}
+{{ include "lore.fullname" . }}-redis.{{ .Release.Namespace }}.svc.cluster.local
+{{- end -}}
+
+{{/* In-cluster URL of one MCP server; call with (list $ "game") */}}
+{{- define "lore.mcpUrl" -}}
+{{- $root := index . 0 }}{{ $name := index . 1 -}}
+http://{{ include "lore.fullname" $root }}-mcp-{{ $name }}.{{ $root.Release.Namespace }}.svc.cluster.local:8000{{ (index $root.Values.mcp.servers $name).path }}
+{{- end -}}
+
+{{- define "lore.image" -}}
+{{ .Values.app.image }}:{{ .Values.app.tag }}
 {{- end -}}
 
 {{- define "lore.embeddingsUrl" -}}

@@ -2,15 +2,22 @@
 # Apply changes with: ./deploy.sh
 #
 # Hosted (not in the cluster): Deepgram (voice) and the LLM provider.
-# In the cluster: PostgreSQL (hard game state), Qdrant (lore vectors), and a
-# small CPU-only Ollama that serves the embedding model for Qdrant writes/queries.
+# In the cluster: PostgreSQL + pgvector (game state, event log, lore vectors), Redis
+# (live event streams, multi-user session data), a CPU-only Ollama serving the
+# embedding model, and the MCP servers.
+#
+# Site-specific settings (hostname, ingress annotations) go in values.local.yaml,
+# which is gitignored and layered on top of this file by deploy.sh.
 
 # Secret holding all credentials. deploy.sh creates it if missing. Keys:
-#   postgres-password   password for the app user (postgres.user)
-#   qdrant-api-key      required on every Qdrant request (api-key header)
-#   deepgram-api-key    from DEEPGRAM_API_KEY at deploy time, or ./deploy.sh set-key
-#   llm-api-key         from LLM_API_KEY at deploy time, or ./deploy.sh set-key
+#   postgres-password   password for the app user (postgres.user)       generated
+#   redis-password      required by Redis (AUTH)                         generated
+#   deepgram-api-key    from DEEPGRAM_API_KEY in secrets.env, or ./deploy.sh set-key
+#   llm-api-key         from LLM_API_KEY in secrets.env, or ./deploy.sh set-key
 credentialsSecret: lore-credentials
+
+# htpasswd-format users allowed through the ingress (./deploy.sh add-user <name>).
+usersSecret: lore-users
 
 # Hosted LLM used for world generation and the GM itself. Only exposed to the app
 # through the lore-config ConfigMap; nothing in this chart calls it.
@@ -24,7 +31,8 @@ deepgram:
   ttsModel: aura-2-thalia-en
 
 postgres:
-  image: postgres:18.6
+  # Official postgres image plus the pgvector extension (enabled by the app's migrations).
+  image: pgvector/pgvector:0.8.6-pg18
   database: lore
   user: lore
   # local-path volumes pin the pod to whichever node it first lands on; use
@@ -47,19 +55,23 @@ postgres:
     work_mem: 4MB
     max_connections: "50"
 
-qdrant:
-  image: qdrant/qdrant:v1.19.1
+redis:
+  image: redis:8.8.3
+  # Session data should expire rather than be evicted: only keys with a TTL are
+  # evicted when full. Event streams are capped by the app instead.
+  maxmemory: 192mb
+  maxmemoryPolicy: volatile-lru
   nodeSelector: {}
   tolerations: []
   persistence:
     storageClass: local-path
-    size: 5Gi
+    size: 1Gi
   resources:
     requests:
-      cpu: 100m
-      memory: 256Mi
+      cpu: 50m
+      memory: 64Mi
     limits:
-      memory: 1Gi
+      memory: 256Mi
 
 # CPU embedding server (Ollama API on :11434). Set enabled: false and point
 # embeddings.url at another endpoint (e.g. http://ollama.ollama:11434) to reuse
@@ -69,8 +81,12 @@ embeddings:
   image: ollama/ollama:0.34.4
   # Pulled into the model volume by an init container on every start (no-op once cached).
   # nomic-embed-text: 768-dim vectors, ~270MB, fine on a Pi CPU.
+  # Changing the model means a new migration (vector column size) and re-embedding all lore.
   model: nomic-embed-text
   dimensions: 768
+  # nomic-embed-text expects task prefixes; set both to "" for models that don't.
+  documentPrefix: "search_document: "
+  queryPrefix: "search_query: "
   # Only used when enabled: false.
   url: ""
   nodeSelector: {}
@@ -85,7 +101,49 @@ embeddings:
     limits:
       memory: 1536Mi
 
-# Restrict Postgres, Qdrant and embeddings to clients in this namespace
-# (kubectl port-forward still works).
+# The Python app image (built by .github/workflows/app.yml). deploy.sh sets the
+# tag to the last commit that touched app/.
+app:
+  image: ghcr.io/camservo-platform/lore
+  tag: latest
+  imagePullSecrets: []
+
+# MCP servers (stateless streamable HTTP; scale with replicas). Each pod runs the
+# database migrations in an init container first.
+mcp:
+  servers:
+    game:
+      module: lore.mcp.game
+      path: /mcp/game
+      replicas: 1
+    lore:
+      module: lore.mcp.lore
+      path: /mcp/lore
+      replicas: 1
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 256Mi
+
+# Public HTTPS entry point, protected by Traefik basic auth. Disabled until a host
+# is set (in values.local.yaml). The authenticated username reaches the app as the
+# X-Lore-User header and is recorded as the actor in the event log.
+ingress:
+  host: ""
+  className: traefik
+  # e.g. cert-manager.io/cluster-issuer, external-dns targets
+  annotations: {}
+  tlsSecretName: lore-tls
+
+# Restrict the data services to clients in this namespace, and the MCP servers to
+# this namespace plus the ingress controller (kubectl port-forward still works).
 networkPolicy:
   enabled: true
+  ingressController:
+    namespace: kube-system
+    podLabels:
+      app.kubernetes.io/name: traefik

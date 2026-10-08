@@ -1,30 +1,44 @@
 #!/usr/bin/env bash
-# Repeatable deploy/ops wrapper for the Lore backing services.
+# Repeatable deploy/ops wrapper for Lore on Kubernetes.
 #
-#   ./deploy.sh [deploy]        install or upgrade (idempotent)
-#   ./deploy.sh diff            render manifests and diff against the cluster
-#   ./deploy.sh status          show pods, services, PVCs
-#   ./deploy.sh set-key <name>  store a hosted-service key (deepgram|llm), read from stdin
-#   ./deploy.sh secret <key>    print one key from the credentials secret
-#   ./deploy.sh psql [args]     psql into the lore database as the app user
-#   ./deploy.sh qdrant <path>   curl the Qdrant API with the api key (e.g. /collections)
-#   ./deploy.sh embed <text>    smoke-test the embedding model
-#   ./deploy.sh forward         port-forward Postgres :5432, Qdrant :6333, embeddings :11434
-#   ./deploy.sh logs [comp]     tail logs (postgres|qdrant|embeddings)
-#   ./deploy.sh uninstall       remove the release (PVCs and credentials are kept)
+#   ./deploy.sh [deploy]          install or upgrade (idempotent)
+#   ./deploy.sh diff              render manifests and diff against the cluster
+#   ./deploy.sh status            show workloads, PVCs, keys and users
+#   ./deploy.sh set-key <name>    store a hosted-service key (deepgram|llm), read from stdin
+#   ./deploy.sh secret <key>      print one key from the credentials secret
+#   ./deploy.sh add-user <name>   create/reset an ingress login; prints the generated password
+#   ./deploy.sh remove-user <name>
+#   ./deploy.sh users             list ingress logins
+#   ./deploy.sh psql [args]       psql into the lore database as the app user
+#   ./deploy.sh redis [args]      redis-cli (e.g. ./deploy.sh redis keys 'lore:*')
+#   ./deploy.sh embed <text>      smoke-test the embedding model
+#   ./deploy.sh forward           port-forward Postgres, Redis, embeddings and MCP servers
+#   ./deploy.sh logs [comp]       tail logs (postgres|redis|embeddings|mcp-game|mcp-lore)
+#   ./deploy.sh uninstall         remove the release (PVCs, credentials and users are kept)
 #
-# Overrides: NAMESPACE, RELEASE, KUBE_CONTEXT, VALUES (default: values.yaml)
-# Keys picked up on deploy if set: DEEPGRAM_API_KEY, LLM_API_KEY
+# Local, gitignored files picked up when present:
+#   secrets.env         DEEPGRAM_API_KEY / LLM_API_KEY, stored in the cluster on deploy
+#   values.local.yaml   site settings layered over values.yaml (ingress host, annotations)
+#
+# Overrides: NAMESPACE, RELEASE, KUBE_CONTEXT, APP_TAG (default: last commit touching app/)
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
+if [[ -f secrets.env ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source secrets.env
+  set +a
+fi
+
 NAMESPACE="${NAMESPACE:-lore}"
 RELEASE="${RELEASE:-lore}"
-VALUES="${VALUES:-values.yaml}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-$(kubectl config current-context)}"
-SECRET="$(awk '/^credentialsSecret:/ {print $2}' "$VALUES")"
-SECRET="${SECRET:-lore-credentials}"
+SECRET="$(awk '/^credentialsSecret:/ {print $2}' values.yaml)"
+USERS_SECRET="$(awk '/^usersSecret:/ {print $2}' values.yaml)"
+VALUES_ARGS=(-f values.yaml)
+[[ -f values.local.yaml ]] && VALUES_ARGS+=(-f values.local.yaml)
 
 kc()   { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
 hm()   { helm --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
@@ -32,31 +46,52 @@ log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
 
+# Images are tagged by commit; deploy the newest commit that changed the app.
+app_tag() {
+  if [[ -n "${APP_TAG:-}" ]]; then echo "$APP_TAG"; return; fi
+  if [[ -n "$(git status --porcelain -- ../app)" ]]; then
+    warn "app/ has uncommitted changes; they are not in any image" >&2
+  fi
+  git log -1 --format=%H -- ../app
+}
+
+helm_args() {
+  echo "${VALUES_ARGS[@]}" --set "app.tag=$(app_tag)"
+}
+
 ensure_namespace() {
   kubectl --context "$KUBE_CONTEXT" create namespace "$NAMESPACE" \
     --dry-run=client -o yaml | kubectl --context "$KUBE_CONTEXT" apply -f - >/dev/null
 }
 
-ensure_credentials() {
-  if kc get secret "$SECRET" >/dev/null 2>&1; then
-    log "Credentials secret '$SECRET' already exists"
-  else
-    log "Creating credentials secret '$SECRET'"
-    kc create secret generic "$SECRET" \
-      --from-literal=postgres-password="$(rand 32)" \
-      --from-literal=qdrant-api-key="$(rand 40)"
-  fi
+# Sets one key in a secret without touching the others.
+put_secret_key() {
+  local secret="$1" key="$2" value="$3" b64
+  b64="$(printf '%s' "$value" | base64 | tr -d '\n')"
+  kc patch secret "$secret" --type merge -p "{\"data\":{\"$key\":\"$b64\"}}" >/dev/null
 }
 
-# Sets one key in the credentials secret without touching the others.
-put_secret_key() {
-  local key="$1" value="$2" b64
-  b64="$(printf '%s' "$value" | base64 | tr -d '\n')"
-  kc patch secret "$SECRET" --type merge -p "{\"data\":{\"$key\":\"$b64\"}}" >/dev/null
+secret_value() {
+  kc get secret "$1" -o jsonpath="{.data.${2//./\\.}}" 2>/dev/null | base64 -d
 }
 
 has_secret_key() {
   [[ -n "$(kc get secret "$SECRET" -o jsonpath="{.data.$1}" 2>/dev/null)" ]]
+}
+
+# Creates the credentials and users secrets if missing, and generates any missing
+# generated key (so new components get a password on upgrade).
+ensure_secrets() {
+  local key
+  kc get secret "$SECRET" >/dev/null 2>&1 || kc create secret generic "$SECRET" >/dev/null
+  kc get secret "$USERS_SECRET" >/dev/null 2>&1 \
+    || kc create secret generic "$USERS_SECRET" --from-literal=users= >/dev/null
+  for key in postgres-password redis-password; do
+    if ! has_secret_key "$key"; then
+      log "Generating $key"
+      put_secret_key "$SECRET" "$key" "$(rand 32)"
+    fi
+  done
 }
 
 ensure_api_keys() {
@@ -65,66 +100,108 @@ ensure_api_keys() {
     key="$name-api-key"
     env="$(tr '[:lower:]' '[:upper:]' <<<"$name")_API_KEY"
     if [[ -n "${!env:-}" ]]; then
-      log "Storing $key from \$$env"
-      put_secret_key "$key" "${!env}"
+      if [[ "$(secret_value "$SECRET" "$key")" != "${!env}" ]]; then
+        log "Storing $key from \$$env"
+        put_secret_key "$SECRET" "$key" "${!env}"
+      fi
     elif ! has_secret_key "$key"; then
-      warn "No $key yet: run '$0 set-key $name' (or set \$$env and redeploy)"
+      warn "No $key yet: add $env to secrets.env (see secrets.env.example) and redeploy"
     fi
   done
 }
 
 cmd_deploy() {
-  log "Context: $KUBE_CONTEXT  Namespace: $NAMESPACE  Release: $RELEASE"
-  helm lint ./chart -f "$VALUES" >/dev/null
+  local tag
+  tag="$(app_tag)"
+  log "Context: $KUBE_CONTEXT  Namespace: $NAMESPACE  Release: $RELEASE  App: ${tag:0:12}"
+  # shellcheck disable=SC2046
+  helm lint ./chart $(helm_args) >/dev/null
   ensure_namespace
-  ensure_credentials
+  ensure_secrets
   ensure_api_keys
   log "helm upgrade --install"
-  hm upgrade --install "$RELEASE" ./chart -f "$VALUES" --timeout 10m
+  # shellcheck disable=SC2046
+  hm upgrade --install "$RELEASE" ./chart $(helm_args) --timeout 10m
   log "Waiting for rollouts..."
   kc rollout status statefulset/"$RELEASE"-postgres --timeout=5m
-  kc rollout status statefulset/"$RELEASE"-qdrant --timeout=5m
+  kc rollout status statefulset/"$RELEASE"-redis --timeout=5m
   if kc get statefulset "$RELEASE"-embeddings >/dev/null 2>&1; then
     # First start downloads the model in the init container.
     kc rollout status statefulset/"$RELEASE"-embeddings --timeout=10m
   fi
+  kc get deployment -l "app.kubernetes.io/instance=$RELEASE" -o name \
+    | xargs -n1 -I{} kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" rollout status {} --timeout=5m
   cmd_status
 }
 
 cmd_diff() {
-  hm template "$RELEASE" ./chart -f "$VALUES" | kc diff -f - || true
+  # shellcheck disable=SC2046
+  hm template "$RELEASE" ./chart $(helm_args) | kc diff -f - || true
 }
 
 cmd_status() {
-  kc get statefulset,pod,svc,pvc
+  kc get statefulset,deployment,pod,svc,ingress,pvc
   local key
   for key in deepgram-api-key llm-api-key; do
     has_secret_key "$key" && echo "$key: set" || echo "$key: MISSING"
   done
+  echo "ingress users: $(cmd_users | paste -sd ' ' -)"
 }
 
 cmd_set_key() {
   local name="${1:-}" value
   [[ "$name" == deepgram || "$name" == llm ]] || { echo "usage: $0 set-key deepgram|llm" >&2; exit 1; }
   ensure_namespace
-  ensure_credentials
+  ensure_secrets
   if [[ -t 0 ]]; then
     read -rsp "$name API key: " value; echo
   else
     IFS= read -r value
   fi
   [[ -n "$value" ]] || { echo "empty key, nothing stored" >&2; exit 1; }
-  put_secret_key "$name-api-key" "$value"
+  put_secret_key "$SECRET" "$name-api-key" "$value"
   log "Stored $name-api-key in '$SECRET' (restart app pods to pick it up)"
 }
 
 cmd_secret() {
-  kc get secret "$SECRET" -o jsonpath="{.data.${1:?usage: $0 secret <key>}}" | base64 -d; echo
+  secret_value "$SECRET" "${1:?usage: $0 secret <key>}"; echo
+}
+
+# Users live in the users secret as htpasswd lines (bcrypt), the format Traefik reads.
+users_file() { secret_value "$USERS_SECRET" users; }
+
+write_users() {
+  put_secret_key "$USERS_SECRET" users "$1"
+}
+
+cmd_users() {
+  users_file | cut -d: -f1 | sed '/^$/d'
+}
+
+cmd_add_user() {
+  local name="${1:?usage: $0 add-user <name>}" password line
+  [[ "$name" =~ ^[a-z0-9_-]+$ ]] || { echo "usernames are lowercase letters, digits, _ and -" >&2; exit 1; }
+  ensure_namespace
+  ensure_secrets
+  password="$(rand 24)"
+  line="$(htpasswd -nbB "$name" "$password")"
+  write_users "$( (users_file | grep -v "^$name:" ; echo "$line") | sed '/^$/d')"
+  log "User '$name' saved. Password (shown once): $password"
+}
+
+cmd_remove_user() {
+  local name="${1:?usage: $0 remove-user <name>}"
+  write_users "$(users_file | grep -v "^$name:" || true)"
+  log "User '$name' removed"
 }
 
 cmd_psql() {
   kc exec -it "$RELEASE"-postgres-0 -c postgres -- \
     sh -c 'PGPASSWORD="$POSTGRES_PASSWORD" exec psql -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" "$@"' psql "$@"
+}
+
+cmd_redis() {
+  kc exec -it "$RELEASE"-redis-0 -c redis -- redis-cli "$@"
 }
 
 # Port-forwards <svc>:<port> to a random local port and runs `fn <base-url> [args...]`.
@@ -143,16 +220,6 @@ with_forward() {
   return "$rc"
 }
 
-cmd_qdrant() {
-  local path="${1:-/collections}" key; shift || true
-  key="$(cmd_secret qdrant-api-key)"
-  _qdrant() {
-    local base="$1"; shift
-    curl -sS -H "api-key: $key" -H 'Content-Type: application/json' "$@" "$base$path"; echo
-  }
-  with_forward qdrant 6333 _qdrant "$@"
-}
-
 cmd_embed() {
   local text="${*:-the dragon sleeps beneath the mountain}" model
   model="$(kc get configmap "$RELEASE"-config -o jsonpath='{.data.EMBEDDINGS_MODEL}')"
@@ -164,9 +231,11 @@ cmd_embed() {
 }
 
 cmd_forward() {
-  log "Postgres localhost:5432  Qdrant localhost:6333  Embeddings localhost:11434 (Ctrl-C to stop)"
+  log "Postgres :5432  Redis :6379  Embeddings :11434  MCP game :8001/mcp/game  lore :8002/mcp/lore (Ctrl-C to stop)"
   kc port-forward svc/"$RELEASE"-postgres 5432:5432 &
-  kc port-forward svc/"$RELEASE"-qdrant 6333:6333 &
+  kc port-forward svc/"$RELEASE"-redis 6379:6379 &
+  kc port-forward svc/"$RELEASE"-mcp-game 8001:8000 &
+  kc port-forward svc/"$RELEASE"-mcp-lore 8002:8000 &
   if kc get svc "$RELEASE"-embeddings >/dev/null 2>&1; then
     kc port-forward svc/"$RELEASE"-embeddings 11434:11434 &
   fi
@@ -182,21 +251,24 @@ cmd_logs() {
 
 cmd_uninstall() {
   hm uninstall "$RELEASE"
-  log "Release removed. PVCs and secret '$SECRET' were kept."
+  log "Release removed. PVCs and secrets '$SECRET', '$USERS_SECRET' were kept."
   log "To wipe everything: kubectl -n $NAMESPACE delete pvc,secret --all"
 }
 
 case "${1:-deploy}" in
   deploy|install|upgrade) cmd_deploy ;;
-  diff)      cmd_diff ;;
-  status)    cmd_status ;;
-  set-key)   cmd_set_key "${2:-}" ;;
-  secret)    cmd_secret "${2:-}" ;;
-  psql)      shift; cmd_psql "$@" ;;
-  qdrant)    shift; cmd_qdrant "$@" ;;
-  embed)     shift; cmd_embed "$@" ;;
-  forward)   cmd_forward ;;
-  logs)      cmd_logs "${2:-}" ;;
-  uninstall) cmd_uninstall ;;
-  *) sed -n '2,17p' "$0"; exit 1 ;;
+  diff)        cmd_diff ;;
+  status)      cmd_status ;;
+  set-key)     cmd_set_key "${2:-}" ;;
+  secret)      cmd_secret "${2:-}" ;;
+  add-user)    cmd_add_user "${2:-}" ;;
+  remove-user) cmd_remove_user "${2:-}" ;;
+  users)       cmd_users ;;
+  psql)        shift; cmd_psql "$@" ;;
+  redis)       shift; cmd_redis "$@" ;;
+  embed)       shift; cmd_embed "$@" ;;
+  forward)     cmd_forward ;;
+  logs)        cmd_logs "${2:-}" ;;
+  uninstall)   cmd_uninstall ;;
+  *) sed -n '2,24p' "$0"; exit 1 ;;
 esac

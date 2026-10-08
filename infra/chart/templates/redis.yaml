@@ -1,31 +1,28 @@
-{{- $ctx := dict "ctx" . "component" "qdrant" }}
-{{- $v := .Values.qdrant }}
+{{- $ctx := dict "ctx" . "component" "redis" }}
+{{- $v := .Values.redis }}
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ include "lore.fullname" . }}-qdrant
+  name: {{ include "lore.fullname" . }}-redis
   labels:
     {{- include "lore.labels" $ctx | nindent 4 }}
 spec:
   selector:
     {{- include "lore.selectorLabels" $ctx | nindent 4 }}
   ports:
-    - name: http
-      port: 6333
-      targetPort: http
-    - name: grpc
-      port: 6334
-      targetPort: grpc
+    - name: redis
+      port: 6379
+      targetPort: redis
 ---
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
-  name: {{ include "lore.fullname" . }}-qdrant
+  name: {{ include "lore.fullname" . }}-redis
   labels:
     {{- include "lore.labels" $ctx | nindent 4 }}
 spec:
   replicas: 1
-  serviceName: {{ include "lore.fullname" . }}-qdrant
+  serviceName: {{ include "lore.fullname" . }}-redis
   selector:
     matchLabels:
       {{- include "lore.selectorLabels" $ctx | nindent 6 }}
@@ -36,45 +33,43 @@ spec:
     spec:
       {{- include "lore.scheduling" $v | nindent 6 }}
       securityContext:
-        runAsUser: 1000
-        runAsGroup: 1000
-        fsGroup: 1000
-      terminationGracePeriodSeconds: 60
+        fsGroup: 999
       containers:
-        - name: qdrant
+        - name: redis
           image: {{ $v.image }}
           imagePullPolicy: IfNotPresent
+          args:
+            - --requirepass
+            - $(REDIS_PASSWORD)
+            # Append-only file, fsync every second: at most ~1s of writes lost on a crash.
+            - --appendonly
+            - "yes"
+            - --maxmemory
+            - {{ $v.maxmemory | quote }}
+            - --maxmemory-policy
+            - {{ $v.maxmemoryPolicy | quote }}
           env:
-            - name: QDRANT__TELEMETRY_DISABLED
-              value: "true"
-            - name: QDRANT__STORAGE__STORAGE_PATH
-              value: /qdrant/storage
-            - name: QDRANT__STORAGE__SNAPSHOTS_PATH
-              value: /qdrant/storage/snapshots
-            {{- include "lore.secretEnv" (list . "QDRANT__SERVICE__API_KEY" "qdrant-api-key") | nindent 12 }}
+            {{- include "lore.secretEnv" (list . "REDIS_PASSWORD" "redis-password") | nindent 12 }}
+            # Lets redis-cli in the container authenticate (./deploy.sh redis).
+            - name: REDISCLI_AUTH
+              value: $(REDIS_PASSWORD)
           ports:
-            - name: http
-              containerPort: 6333
-            - name: grpc
-              containerPort: 6334
-          # /readyz and /livez are exempt from the API key.
+            - name: redis
+              containerPort: 6379
           readinessProbe:
-            httpGet:
-              path: /readyz
-              port: http
+            exec:
+              command: ["redis-cli", "ping"]
             periodSeconds: 10
           livenessProbe:
-            httpGet:
-              path: /livez
-              port: http
+            tcpSocket:
+              port: redis
             initialDelaySeconds: 15
             periodSeconds: 30
-            failureThreshold: 6
           resources:
             {{- toYaml $v.resources | nindent 12 }}
           volumeMounts:
             - name: data
-              mountPath: /qdrant/storage
+              mountPath: /data
   volumeClaimTemplates:
     - metadata:
         name: data

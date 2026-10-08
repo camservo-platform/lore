@@ -1,0 +1,79 @@
+{{- $root := . }}
+{{- range $name, $server := .Values.mcp.servers }}
+{{- $ctx := dict "ctx" $root "component" (printf "mcp-%s" $name) }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lore.fullname" $root }}-mcp-{{ $name }}
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "lore.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lore.fullname" $root }}-mcp-{{ $name }}
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $server.replicas }}
+  selector:
+    matchLabels:
+      {{- include "lore.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lore.selectorLabels" $ctx | nindent 8 }}
+        lore/mcp: "true"
+    spec:
+      {{- include "lore.scheduling" $root.Values.mcp | nindent 6 }}
+      {{- with $root.Values.app.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+      initContainers:
+        # Idempotent and serialised by an advisory lock, so every pod can run it.
+        - name: migrate
+          image: {{ include "lore.image" $root }}
+          command: ["python", "-m", "lore.migrate"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "lore.fullname" $root }}-config
+          env:
+            {{- include "lore.secretEnv" (list $root "PGPASSWORD" "postgres-password") | nindent 12 }}
+      containers:
+        - name: mcp
+          image: {{ include "lore.image" $root }}
+          command: ["python", "-m", {{ $server.module | quote }}]
+          envFrom:
+            - configMapRef:
+                name: {{ include "lore.fullname" $root }}-config
+          env:
+            {{- include "lore.secretEnv" (list $root "PGPASSWORD" "postgres-password") | nindent 12 }}
+            {{- include "lore.secretEnv" (list $root "REDIS_PASSWORD" "redis-password") | nindent 12 }}
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml $root.Values.mcp.resources | nindent 12 }}
+{{- end }}
