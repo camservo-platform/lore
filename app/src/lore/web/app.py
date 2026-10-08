@@ -13,7 +13,7 @@ import json
 import logging
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -25,7 +25,8 @@ from starlette.applications import Starlette
 from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, Response, StreamingResponse
-from starlette.routing import Mount, Route
+from starlette.routing import Mount, Route, WebSocketRoute
+from starlette.websockets import WebSocket
 from starlette.staticfiles import StaticFiles
 
 from lore import admin, worldgen
@@ -38,11 +39,15 @@ from lore.gm import (
 from lore.mcp.common import USER_HEADER
 from lore.settings import Settings
 from lore.voice import Voice
+from lore.web import conversation
 
 log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 TRANSCRIPT_TTL = 30 * 24 * 3600
+# Voice sockets authenticate with a one-time ticket fetched through the normal login:
+# browsers don't reliably send basic-auth credentials on WebSocket upgrades.
+TICKET_TTL = 60
 # Per-player display history: what each player said and what the GM answered them.
 LINES_KEPT = 200
 LOCK_TTL = 600
@@ -78,7 +83,7 @@ class WebSettings:
             llm_model=env.get("LLM_MODEL", "claude-opus-5-5"),
             llm_effort=env.get("LLM_EFFORT", "medium"),
             deepgram_api_key=env.get("DEEPGRAM_API_KEY") or None,
-            stt_model=env.get("DEEPGRAM_STT_MODEL", "nova-3"),
+            stt_model=env.get("DEEPGRAM_STT_MODEL", "flux-general-en"),
             tts_model=env.get("DEEPGRAM_TTS_MODEL", "aura-2-thalia-en"),
             dev_user=env.get("LORE_DEV_USER") or None,
             admins=frozenset(u.strip() for u in env.get("LORE_ADMINS", "").split(",") if u.strip()),
@@ -164,7 +169,7 @@ def create_app() -> Starlette:
     toolbox = Toolbox(settings.mcp_servers)
     gm = GameMaster(llm, toolbox, settings.llm_model, settings.llm_effort)
     voice = (
-        Voice(settings.deepgram_api_key, settings.stt_model, settings.tts_model) if settings.deepgram_api_key else None
+        Voice(settings.deepgram_api_key, settings.tts_model) if settings.deepgram_api_key else None
     )
     # Turns run as tasks so a dropped connection can't cut one off half-applied.
     background: set[asyncio.Task] = set()
@@ -227,64 +232,88 @@ def create_app() -> Starlette:
             llm, settings.llm_model, toolbox, user, body.get("theme", ""), (body.get("name") or "").strip() or None
         ))
 
+    async def acquire_turn(table: Table, turn_id: str, wait: float = 0) -> bool:
+        """Takes the table's turn lock, waiting up to `wait` seconds for another player's turn."""
+        deadline = asyncio.get_running_loop().time() + wait
+        while not await redis.set(table.lock, turn_id, nx=True, ex=LOCK_TTL):
+            if asyncio.get_running_loop().time() >= deadline:
+                return False
+            await asyncio.sleep(0.5)
+        return True
+
+    async def play_turn(
+        table: Table, turn_id: str, campaign: str, user: str, said: str, mode: str,
+        emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None = None,
+    ) -> None:
+        """Runs one GM turn under an already-acquired lock, streaming events to `emit`.
+        `said` is what the player said (shown in their lines); `note` is extra context
+        for the GM only, such as that they interrupted."""
+        text = said or KICKOFF
+        if note:
+            text = f"({note}) {text}"
+        saved = await table.load()
+        messages = _complete_history(saved["messages"])
+        current = instructions_version(campaign)
+        if messages:
+            # Conversations from before instructions were versioned get the update once.
+            system, version = saved["system"] or system_prompt(campaign), saved["version"] or "unversioned"
+        else:
+            system, version = system_prompt(campaign), current
+        messages.append({"role": "user", "content": f"{user}: {text}"})
+        # Operator notes go in one appended system message: never edit what was sent.
+        notes = []
+        if version != current:
+            notes.append(updated_instructions(campaign))
+            version = current
+        if mode != saved["mode"]:
+            notes.append(style_note(mode))
+        if notes:
+            messages.append({"role": "system", "content": "\n\n".join(notes)})
+        reply = ""
+        try:
+            async for event in gm.turn(campaign, user, system, messages):
+                if event["type"] == "done":
+                    reply = event["text"]
+                await emit(event)
+        except Exception as e:
+            log.exception("turn failed")
+            await emit({"type": "error", "text": f"Something went wrong: {e}"})
+        finally:
+            await table.save(_complete_history(messages), mode, system, version)
+            await redis.delete(table.lock)
+            if reply:
+                lines = ([{"role": "player", "text": said}] if said else []) + [{"role": "gm", "text": reply}]
+                await table.add_lines(user, *lines)
+                await redis.xadd(
+                    table.chat, {"turn": turn_id, "user": user, "message": said or text, "reply": reply},
+                    maxlen=200, approximate=True,
+                )
+
+    def in_background(coro) -> asyncio.Task:
+        task = asyncio.create_task(coro)
+        background.add(task)
+        task.add_done_callback(background.discard)
+        return task
+
     async def take_turn(request: Request) -> Response:
         user = user_of(request)
         table = Table(redis, int(request.path_params["campaign_id"]))
         body = await request.json()
-        campaign = body["campaign"]
         mode = "speech" if body.get("mode") == "speech" else "text"
-        said = (body.get("message") or "").strip()
-        text = said or KICKOFF
         turn_id = uuid.uuid4().hex
-
-        if not await redis.set(table.lock, turn_id, nx=True, ex=LOCK_TTL):
+        if not await acquire_turn(table, turn_id):
             raise HTTPException(409, "The Game Master is answering another player; try again in a moment.")
 
         queue: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue()
 
         async def run() -> None:
-            saved = await table.load()
-            messages = _complete_history(saved["messages"])
-            current = instructions_version(campaign)
-            if messages:
-                # Conversations from before instructions were versioned get the update once.
-                system, version = saved["system"] or system_prompt(campaign), saved["version"] or "unversioned"
-            else:
-                system, version = system_prompt(campaign), current
-            messages.append({"role": "user", "content": f"{user}: {text}"})
-            # Operator notes go in one appended system message: never edit what was sent.
-            notes = []
-            if version != current:
-                notes.append(updated_instructions(campaign))
-                version = current
-            if mode != saved["mode"]:
-                notes.append(style_note(mode))
-            if notes:
-                messages.append({"role": "system", "content": "\n\n".join(notes)})
-            reply = ""
             try:
-                async for event in gm.turn(campaign, user, system, messages):
-                    if event["type"] == "done":
-                        reply = event["text"]
-                    await queue.put(event)
-            except Exception as e:
-                log.exception("turn failed")
-                await queue.put({"type": "error", "text": f"Something went wrong: {e}"})
+                await play_turn(table, turn_id, body["campaign"], user, (body.get("message") or "").strip(), mode,
+                                queue.put)
             finally:
-                await table.save(_complete_history(messages), mode, system, version)
-                await redis.delete(table.lock)
-                if reply:
-                    lines = ([{"role": "player", "text": said}] if said else []) + [{"role": "gm", "text": reply}]
-                    await table.add_lines(user, *lines)
-                    await redis.xadd(
-                        table.chat, {"turn": turn_id, "user": user, "message": text, "reply": reply},
-                        maxlen=200, approximate=True,
-                    )
                 await queue.put(None)
 
-        task = asyncio.create_task(run())
-        background.add(task)
-        task.add_done_callback(background.discard)
+        in_background(run())
 
         async def events() -> AsyncIterator[dict[str, Any]]:
             yield {"type": "turn", "id": turn_id}
@@ -292,6 +321,45 @@ def create_app() -> Starlette:
                 yield event
 
         return sse(events())
+
+    async def voice_ticket(request: Request) -> Response:
+        user = user_of(request)
+        require_voice()
+        body = await request.json()
+        ticket = uuid.uuid4().hex
+        await redis.set(
+            f"lore:voice:ticket:{ticket}",
+            json.dumps({"user": user, "campaign_id": int(body["campaign_id"]), "campaign": body["campaign"]}),
+            ex=TICKET_TTL,
+        )
+        return JSONResponse({"ticket": ticket})
+
+    async def voice_socket(ws: WebSocket) -> None:
+        raw = await redis.getdel(f"lore:voice:ticket:{ws.query_params.get('ticket', '')}")
+        if not raw or voice is None:
+            await ws.close(code=4401)
+            return
+        info = json.loads(raw)
+        user, campaign = info["user"], info["campaign"]
+        table = Table(redis, info["campaign_id"])
+        await ws.accept()
+
+        async def play(said: str, interrupted: bool, emit) -> None:
+            turn_id = uuid.uuid4().hex
+            await emit({"type": "turn", "id": turn_id, "said": said})
+            # Spoken turns wait for another player's turn to finish instead of failing.
+            if not await acquire_turn(table, turn_id, wait=120):
+                await emit({"type": "error", "text": "The Game Master is still busy with another player."})
+                return
+            note = "I'm interrupting you" if interrupted else None
+            # Shielded: if this player hangs up mid-turn, the turn still completes cleanly.
+            await asyncio.shield(in_background(
+                play_turn(table, turn_id, campaign, user, said, "speech", emit, note=note)
+            ))
+
+        log.info("voice session started: %s at %s", user, campaign)
+        await conversation.serve(ws, settings.deepgram_api_key, settings.stt_model, play)
+        log.info("voice session ended: %s at %s", user, campaign)
 
     async def recent_lines(request: Request) -> Response:
         """This player's own recent lines at this table (other players' turns aren't included)."""
@@ -329,14 +397,6 @@ def create_app() -> Starlette:
                             yield {"type": "chat", **fields}
 
         return sse(events())
-
-    async def stt(request: Request) -> Response:
-        user_of(request)
-        audio = await request.body()
-        if not audio:
-            raise HTTPException(400, "No audio.")
-        text = await require_voice().transcribe(audio, request.headers.get("content-type", "audio/webm"))
-        return JSONResponse({"text": text})
 
     async def tts(request: Request) -> Response:
         user_of(request)
@@ -407,8 +467,9 @@ def create_app() -> Starlette:
             Route("/api/campaigns/{campaign_id:int}/reset", reset_table, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/lines", recent_lines),
             Route("/api/campaigns/{campaign_id:int}/feed", feed),
-            Route("/api/stt", stt, methods=["POST"]),
             Route("/api/tts", tts, methods=["POST"]),
+            Route("/api/voice/ticket", voice_ticket, methods=["POST"]),
+            WebSocketRoute("/ws/voice", voice_socket),
             Route("/api/admin/overview", admin_overview),
             Route("/api/admin/sql", admin_sql, methods=["POST"]),
             Route("/api/admin/vector", admin_vector, methods=["POST"]),

@@ -30,7 +30,9 @@ llm:
 
 deepgram:
   # Deepgram models the app should use; exposed via lore-config.
-  sttModel: nova-3
+  # Live conversation uses Deepgram Flux (turn detection and interruptions); it must be a
+  # Flux model: flux-general-en, or flux-general-multi for other languages.
+  sttModel: flux-general-en
   ttsModel: aura-2-thalia-en
 
 postgres:

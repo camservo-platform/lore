@@ -56,10 +56,11 @@
         <button type="submit" class="primary" id="send">Send</button>
       </form>
       <div class="talk" id="talk" hidden>
+        <p class="heard" id="heard" hidden></p>
         <button class="mic" id="mic" aria-pressed="false">
-          <span class="mic-dot"></span><span id="mic-label">Tap to speak</span>
+          <span class="mic-dot"></span><span id="mic-label">Start conversation</span>
         </button>
-        <p class="hint">Or hold the space bar while you talk.</p>
+        <p class="hint"><span id="talk-status"></span> Talk naturally: the Game Master answers when you pause, and you can interrupt it any time. Headphones work best.</p>
       </div>
     </section>
 

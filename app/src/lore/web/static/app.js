@@ -93,7 +93,10 @@ function setMode(mode) {
   document.querySelectorAll(".mode button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.mode === mode)));
   $("composer").hidden = mode === "speech";
   $("talk").hidden = mode !== "speech";
-  if (mode === "text") speaker.stop();
+  if (mode === "text") {
+    talk.stop();
+    speaker.stop();
+  }
 }
 
 document.querySelectorAll(".mode button").forEach((b) => b.addEventListener("click", () => setMode(b.dataset.mode)));
@@ -101,6 +104,7 @@ document.querySelectorAll(".mode button").forEach((b) => b.addEventListener("cli
 // ---------- lobby ---------------------------------------------------------------------
 
 function showView(name) {
+  if (name !== "table") talk.stop();
   for (const view of ["lobby", "table", "admin"]) $(view).hidden = view !== name;
   $("admin-link").setAttribute("aria-pressed", String(name === "admin"));
 }
@@ -174,6 +178,7 @@ $("forge").addEventListener("submit", async (e) => {
 // ---------- table ---------------------------------------------------------------------
 
 async function enterCampaign(campaign, fresh) {
+  talk.stop();
   state.campaign = campaign;
   showView("table");
   $("campaign-title").textContent = campaign.name;
@@ -188,7 +193,7 @@ async function enterCampaign(campaign, fresh) {
     for (const line of lines) addMessage(line.role, line.text, line.role === "player" ? state.user : undefined);
   } else {
     addMessage("gm", state.mode === "speech"
-      ? "Welcome back. Speak to continue, or say “recap” to hear where things stand."
+      ? "Welcome back. Start the conversation and speak to continue, or ask for a recap."
       : "Welcome back. Say something, or press Send with an empty message for a recap.");
   }
 }
@@ -234,7 +239,6 @@ function setActivity(text) {
 function setBusy(busy) {
   state.busy = busy;
   $("send").disabled = busy;
-  $("mic").disabled = busy && !recorder.active;
 }
 
 async function takeTurn(message) {
@@ -366,6 +370,8 @@ function closeFeed() {
 // played back in order while later text is still arriving.
 const speaker = {
   pending: "",
+  queued: 0,      // chunks fetched or playing
+  speaking: false,
   queue: Promise.resolve(),
   audio: null,
   generation: 0,
@@ -395,14 +401,15 @@ const speaker = {
     const clean = plainText(text);
     if (!clean) return;
     const generation = this.generation;
+    this.queued++;
     // Start fetching now; play once everything queued before it has finished.
     const audio = api("/api/tts", { method: "POST", body: JSON.stringify({ text: clean }) })
       .then((r) => r.blob())
       .catch((e) => { toast(`Speech failed: ${e.message}`); return null; });
     this.queue = this.queue.then(async () => {
       const blob = await audio;
-      if (!blob || generation !== this.generation) return;
-      await this.play(blob);
+      if (blob && generation === this.generation) await this.play(blob);
+      if (generation === this.generation && --this.queued === 0) this.setSpeaking(false);
     });
   },
   play(blob) {
@@ -413,81 +420,158 @@ const speaker = {
       const done = () => { URL.revokeObjectURL(url); this.audio = null; resolve(); };
       el.onended = done;
       el.onerror = done;
+      this.setSpeaking(true);
       el.play().catch(done);
     });
   },
+  setSpeaking(speaking) {
+    if (speaking === this.speaking) return;
+    this.speaking = speaking;
+    talk.playback(speaking);
+  },
   stop() {
     this.generation++;
+    this.queued = 0;
+    this.setSpeaking(false);
     this.pending = "";
     if (this.audio) { this.audio.pause(); this.audio.dispatchEvent(new Event("ended")); }
     this.queue = Promise.resolve();
   },
 };
 
-// ---------- speech in -----------------------------------------------------------------
+// ---------- conversation (speech in) -------------------------------------------------
 
-const recorder = {
-  active: false,
-  media: null,
-  chunks: [],
-  async start() {
-    if (this.active || state.busy) return;
-    speaker.stop();
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      this.media = new MediaRecorder(stream);
-    } catch (e) {
-      toast(`Microphone unavailable: ${e.message}`);
-      return;
+// Resamples the mic to 16 kHz 16-bit mono PCM and posts 80 ms chunks, the format
+// Deepgram Flux expects.
+const PCM_WORKLET = `
+class Pcm16 extends AudioWorkletProcessor {
+  constructor() { super(); this.step = sampleRate / 16000; this.pos = 0; this.out = new Int16Array(1280); this.n = 0; }
+  process(inputs) {
+    const input = inputs[0][0];
+    if (!input) return true;
+    while (this.pos < input.length) {
+      const i = Math.floor(this.pos), frac = this.pos - i;
+      const a = input[i], b = i + 1 < input.length ? input[i + 1] : a;
+      const v = Math.max(-1, Math.min(1, a + (b - a) * frac));
+      this.out[this.n++] = v < 0 ? v * 0x8000 : v * 0x7fff;
+      if (this.n === this.out.length) {
+        this.port.postMessage(this.out.buffer, [this.out.buffer]);
+        this.out = new Int16Array(1280);
+        this.n = 0;
+      }
+      this.pos += this.step;
     }
-    this.chunks = [];
-    this.media.ondataavailable = (e) => e.data.size && this.chunks.push(e.data);
-    this.media.start();
+    this.pos -= input.length;
+    return true;
+  }
+}
+registerProcessor("pcm16", Pcm16);`;
+
+// A live, hands-free conversation: the GM answers when you pause, and talking over it
+// stops its voice (the server decides when speech counts as an interruption).
+const talk = {
+  active: false,
+  ws: null,
+  ctx: null,
+  stream: null,
+  gm: null,      // the GM message being streamed
+  gmText: "",
+  async start() {
+    if (this.active || !state.campaign) return;
     this.active = true;
-    $("mic").setAttribute("aria-pressed", "true");
-    $("mic-label").textContent = "Listening… tap to send";
+    this.setUi("Connecting…");
+    try {
+      const { ticket } = await (await api("/api/voice/ticket", {
+        method: "POST", body: JSON.stringify({ campaign_id: state.campaign.id, campaign: state.campaign.name }),
+      })).json();
+      this.stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      });
+      const scheme = location.protocol === "https:" ? "wss" : "ws";
+      this.ws = new WebSocket(`${scheme}://${location.host}/ws/voice?ticket=${ticket}`);
+      this.ws.binaryType = "arraybuffer";
+      this.ws.onmessage = (msg) => this.handle(JSON.parse(msg.data));
+      this.ws.onclose = () => this.stop();
+      await new Promise((resolve, reject) => {
+        this.ws.onopen = resolve;
+        this.ws.onerror = () => reject(new Error("couldn't open the voice connection"));
+      });
+      this.ctx = new AudioContext();
+      const url = URL.createObjectURL(new Blob([PCM_WORKLET], { type: "application/javascript" }));
+      await this.ctx.audioWorklet.addModule(url);
+      URL.revokeObjectURL(url);
+      const node = new AudioWorkletNode(this.ctx, "pcm16");
+      node.port.onmessage = (e) => this.ws?.readyState === WebSocket.OPEN && this.ws.send(e.data);
+      const mute = this.ctx.createGain();
+      mute.gain.value = 0;  // keeps the worklet pulled by the graph without playing the mic back
+      this.ctx.createMediaStreamSource(this.stream).connect(node).connect(mute).connect(this.ctx.destination);
+    } catch (e) {
+      toast(`Couldn't start the conversation: ${e.message}`);
+      this.stop();
+    }
   },
-  async stop() {
+  stop() {
     if (!this.active) return;
     this.active = false;
-    $("mic").setAttribute("aria-pressed", "false");
-    $("mic-label").textContent = "Transcribing…";
-    $("mic").disabled = true;
-    const stopped = new Promise((resolve) => (this.media.onstop = resolve));
-    this.media.stop();
-    await stopped;
-    this.media.stream.getTracks().forEach((t) => t.stop());
-    const blob = new Blob(this.chunks, { type: this.media.mimeType || "audio/webm" });
-    try {
-      const resp = await api("/api/stt", { method: "POST", body: blob, headers: { "Content-Type": blob.type } });
-      const { text } = await resp.json();
-      if (text.trim()) await takeTurn(text.trim());
-      else toast("I didn't catch that. Try again.");
-    } catch (e) {
-      toast(`Transcription failed: ${e.message}`);
-    } finally {
-      $("mic-label").textContent = "Tap to speak";
-      $("mic").disabled = state.busy;
+    try { this.ws?.readyState === WebSocket.OPEN && this.ws.send(JSON.stringify({ type: "stop" })); } catch {}
+    this.ws?.close();
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.ctx?.close();
+    this.ws = this.stream = this.ctx = null;
+    this.finishReply();
+    this.caption("");
+    this.setUi(null);
+  },
+  playback(speaking) {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "playback", speaking }));
+  },
+  handle(ev) {
+    if (ev.type === "ready") this.setUi("Listening…");
+    else if (ev.type === "heard") this.caption(ev.final ? "" : ev.text);
+    else if (ev.type === "barge_in") speaker.stop();
+    else if (ev.type === "turn") {
+      this.finishReply();
+      state.myTurns.add(ev.id);
+      if (ev.said) addMessage("player", ev.said, state.user);
+      this.gm = addMessage("gm", "");
+      this.gm.classList.add("streaming");
+      this.gmText = "";
+      speaker.begin();
+      setActivity("thinking");
+    } else if (ev.type === "text" && this.gm) {
+      this.gmText += ev.text;
+      this.gm.querySelector(".body").innerHTML = renderMarkdown(this.gmText);
+      this.gm.scrollIntoView({ block: "end" });
+      setActivity("");
+      speaker.feed(ev.text);
+    } else if (ev.type === "tool") setActivity(TOOL_VERBS[ev.name] || "working");
+    else if (ev.type === "error") addMessage("error", ev.text);
+    else if (ev.type === "done") {
+      speaker.flush();
+      this.finishReply();
+      refreshState();
     }
+  },
+  finishReply() {
+    if (!this.gm) return;
+    this.gm.classList.remove("streaming");
+    if (!this.gmText.trim()) this.gm.remove();
+    this.gm = null;
+    setActivity("");
+  },
+  caption(text) {
+    const el = $("heard");
+    el.textContent = text;
+    el.hidden = !text;
+  },
+  setUi(status) {
+    $("mic").setAttribute("aria-pressed", String(this.active));
+    $("mic-label").textContent = this.active ? "End conversation" : "Start conversation";
+    $("talk-status").textContent = status || "";
   },
 };
 
-$("mic").addEventListener("click", () => (recorder.active ? recorder.stop() : recorder.start()));
-
-// Hold space to talk (when not typing).
-const typing = () => ["INPUT", "TEXTAREA"].includes(document.activeElement?.tagName);
-document.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && !e.repeat && state.mode === "speech" && !$("table").hidden && !typing()) {
-    e.preventDefault();
-    recorder.start();
-  }
-});
-document.addEventListener("keyup", (e) => {
-  if (e.code === "Space" && state.mode === "speech" && recorder.active && !typing()) {
-    e.preventDefault();
-    recorder.stop();
-  }
-});
+$("mic").addEventListener("click", () => (talk.active ? talk.stop() : talk.start()));
 
 // ---------- admin ---------------------------------------------------------------------
 
