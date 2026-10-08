@@ -7,6 +7,7 @@ const state = {
   admin: false,
   mode: "text",
   campaign: null,      // {id, name, setting}
+  beforeAdmin: null,   // the campaign open when admin was toggled on
   busy: false,
   myTurns: new Set(),  // turn ids started from this tab (skip their echo on the feed)
   feed: null,
@@ -82,10 +83,13 @@ async function postStream(path, body, onEvent) {
 
 // ---------- mode ----------------------------------------------------------------------
 
+// v2: speech became the default, so earlier saved choices start over once.
+const MODE_KEY = "lore.mode.v2";
+
 function setMode(mode) {
   if (mode === "speech" && !state.speechAvailable) mode = "text";
   state.mode = mode;
-  try { localStorage.setItem("lore.mode", mode); } catch {}
+  try { localStorage.setItem(MODE_KEY, mode); } catch {}
   document.querySelectorAll(".mode button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.mode === mode)));
   $("composer").hidden = mode === "speech";
   $("talk").hidden = mode !== "speech";
@@ -102,6 +106,7 @@ function showView(name) {
 }
 
 async function showLobby() {
+  state.beforeAdmin = null;
   closeFeed();
   speaker.stop();
   state.campaign = null;
@@ -175,11 +180,26 @@ async function enterCampaign(campaign, fresh) {
   $("transcript").innerHTML = "";
   history.replaceState(null, "", `/?campaign=${campaign.id}`);
   openFeed();
+  const lines = fresh ? [] : await recentLines(campaign);
   await refreshState();
   if (fresh) {
     takeTurn("");  // the GM opens the first scene
+  } else if (lines.length) {
+    for (const line of lines) addMessage(line.role, line.text, line.role === "player" ? state.user : undefined);
   } else {
-    addMessage("gm", "Welcome back. Say something, or press Send with an empty message for a recap.");
+    addMessage("gm", state.mode === "speech"
+      ? "Welcome back. Speak to continue, or say “recap” to hear where things stand."
+      : "Welcome back. Say something, or press Send with an empty message for a recap.");
+  }
+}
+
+// Your own recent lines at this table, so returning picks up where you left off.
+async function recentLines(campaign) {
+  try {
+    return await (await api(`/api/campaigns/${campaign.id}/lines?count=40`)).json();
+  } catch (e) {
+    toast(`Couldn't load your recent lines: ${e.message}`);
+    return [];
   }
 }
 
@@ -483,6 +503,7 @@ const SQL_EXAMPLES = {
 async function showAdmin() {
   closeFeed();
   speaker.stop();
+  if (state.campaign) state.beforeAdmin = state.campaign;
   state.campaign = null;
   showView("admin");
   $("campaign-title").textContent = "Admin";
@@ -496,8 +517,13 @@ async function showAdmin() {
   }
 }
 
-// A toggle: clicking it again leaves admin for the default (lobby) view.
-$("admin-link").addEventListener("click", () => ($("admin").hidden ? showAdmin() : showLobby()));
+// A toggle: clicking it again goes back to where you were (the world you had open, or the lobby).
+$("admin-link").addEventListener("click", () => {
+  if ($("admin").hidden) return showAdmin();
+  const back = state.beforeAdmin;
+  state.beforeAdmin = null;
+  return back ? enterCampaign(back, false) : showLobby();
+});
 
 document.querySelectorAll(".tabs button").forEach((tab) =>
   tab.addEventListener("click", () => {
@@ -639,8 +665,8 @@ $("vector-form").addEventListener("submit", async (e) => {
     b.disabled = true;
     b.title = "Speech needs a Deepgram API key on the server.";
   }
-  let saved = "text";
-  try { saved = localStorage.getItem("lore.mode") || "text"; } catch {}
+  let saved = "speech";
+  try { saved = localStorage.getItem(MODE_KEY) || "speech"; } catch {}
   setMode(saved);
 
   const params = new URLSearchParams(location.search);

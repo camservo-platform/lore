@@ -43,6 +43,8 @@ log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
 TRANSCRIPT_TTL = 30 * 24 * 3600
+# Per-player display history: what each player said and what the GM answered them.
+LINES_KEPT = 200
 LOCK_TTL = 600
 KICKOFF = "(I've just sat down at the table and I'm ready to play.)"
 
@@ -96,6 +98,7 @@ class Table:
         self.version = f"lore:campaign:{campaign_id}:gm:version"
         self.lock = f"lore:campaign:{campaign_id}:gm:lock"
         self.chat = f"lore:campaign:{campaign_id}:chat"
+        self._campaign_id = campaign_id
         self.events = stream_key(campaign_id)
 
     async def load(self) -> dict[str, Any]:
@@ -108,6 +111,20 @@ class Table:
                                (self.system, system), (self.version, version)):
                 pipe.set(key, value, ex=TRANSCRIPT_TTL)
             await pipe.execute()
+
+    def _lines(self, user: str) -> str:
+        return f"lore:campaign:{self._campaign_id}:user:{user}:lines"
+
+    async def add_lines(self, user: str, *lines: dict[str, Any]) -> None:
+        key = self._lines(user)
+        async with self.redis.pipeline() as pipe:
+            pipe.rpush(key, *(json.dumps(line) for line in lines))
+            pipe.ltrim(key, -LINES_KEPT, -1)
+            pipe.expire(key, TRANSCRIPT_TTL)
+            await pipe.execute()
+
+    async def recent_lines(self, user: str, count: int) -> list[dict[str, Any]]:
+        return [json.loads(line) for line in await self.redis.lrange(self._lines(user), -count, -1)]
 
     async def reset(self) -> None:
         await self.redis.delete(self.messages, self.mode, self.system, self.version)
@@ -216,7 +233,8 @@ def create_app() -> Starlette:
         body = await request.json()
         campaign = body["campaign"]
         mode = "speech" if body.get("mode") == "speech" else "text"
-        text = (body.get("message") or "").strip() or KICKOFF
+        said = (body.get("message") or "").strip()
+        text = said or KICKOFF
         turn_id = uuid.uuid4().hex
 
         if not await redis.set(table.lock, turn_id, nx=True, ex=LOCK_TTL):
@@ -256,6 +274,8 @@ def create_app() -> Starlette:
                 await table.save(_complete_history(messages), mode, system, version)
                 await redis.delete(table.lock)
                 if reply:
+                    lines = ([{"role": "player", "text": said}] if said else []) + [{"role": "gm", "text": reply}]
+                    await table.add_lines(user, *lines)
                     await redis.xadd(
                         table.chat, {"turn": turn_id, "user": user, "message": text, "reply": reply},
                         maxlen=200, approximate=True,
@@ -272,6 +292,13 @@ def create_app() -> Starlette:
                 yield event
 
         return sse(events())
+
+    async def recent_lines(request: Request) -> Response:
+        """This player's own recent lines at this table (other players' turns aren't included)."""
+        user = user_of(request)
+        table = Table(redis, int(request.path_params["campaign_id"]))
+        count = max(1, min(int(request.query_params.get("count", "40")), LINES_KEPT))
+        return JSONResponse(await table.recent_lines(user, count))
 
     async def reset_table(request: Request) -> Response:
         user_of(request)
@@ -378,6 +405,7 @@ def create_app() -> Starlette:
             Route("/api/campaigns/{campaign_id:int}/state", campaign_state),
             Route("/api/campaigns/{campaign_id:int}/turn", take_turn, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/reset", reset_table, methods=["POST"]),
+            Route("/api/campaigns/{campaign_id:int}/lines", recent_lines),
             Route("/api/campaigns/{campaign_id:int}/feed", feed),
             Route("/api/stt", stt, methods=["POST"]),
             Route("/api/tts", tts, methods=["POST"]),
