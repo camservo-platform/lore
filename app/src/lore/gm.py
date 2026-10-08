@@ -31,6 +31,34 @@ BETAS = ["compact-2026-01-12", "server-side-fallback-2026-07-01"]
 BINDING_BETA = "thinking-binding-controls-2026-08-01"
 THINKING = {"type": "adaptive", "block_binding": {"prefix_mismatch_behavior": "drop_block"}}
 MAX_ROUNDS = 16
+# Calls that only record what the narration already said. Text the model writes after a
+# round of nothing but these, once it has narrated, is commentary ("I logged that...")
+# rather than story, so players don't see or hear it.
+RECORD_TOOLS = frozenset({"log_event", "add_lore", "add_item", "move_character", "start_session", "end_session"})
+
+# On current models, text written between tool calls comes back as hidden progress notes,
+# not text, so narration followed by record-keeping in one response would vanish. Tool
+# inputs are delivered verbatim, so the GM speaks to the table through this tool (handled
+# here, not by an MCP server); its text streams to players as it's written.
+NARRATE = "narrate"
+NARRATE_TOOL = {
+    "name": NARRATE,
+    "description": (
+        "Say something to the players: narration, and characters' lines in <say> tags. Use it as soon as "
+        "you know what happens, before any record-keeping calls; text you write between tool calls never "
+        "reaches the players."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {"text": {"type": "string", "description": "Exactly what the players should read or hear."}},
+        "required": ["text"],
+    },
+    "eager_input_streaming": True,
+}
+NO_NARRATION_NUDGE = (
+    "[Operator note: nothing reached the players this turn. Tell them what happens now, using narrate. "
+    "Don't mention this note.]"
+)
 
 SYSTEM = """\
 You are the Game Master of a tabletop role-playing game, running a campaign for one
@@ -44,6 +72,10 @@ How you run the game:
   <say who="Harrow Quell" voice="masculine">Which guild is lying to me?</say>
   Narration stays outside the tag. Use the same name every time a character speaks (so
   they keep their voice) and give voice="feminine" or voice="masculine" when you know it.
+- When it isn't clear what the players could do next (they seem stuck or unsure, or the
+  scene has no obvious way forward), end with one very simple suggestion, e.g. "You could
+  ask the ferryman about the stranger." Offer one option, two at most, as a possibility
+  rather than an instruction, and leave it out when the choices are already obvious.
 - Be brief by default: usually two to four sentences covering what the characters
   notice and what just changed, then hand the scene back. Go longer only when a player
   asks for more (looking closer, questioning someone, searching) or when something truly
@@ -66,10 +98,15 @@ How you run the game:
      using up or losing items, conditions, status. Their results can differ from what
      you expect (a character drops to 0 HP, can't afford something), so narrate from
      what the tools return.
-  3. Narrate the outcome.
-  4. Only then do the record-keeping that can't change what you said: log_event,
-     add_lore, add_item for things found or given, move_character. The players are
-     already hearing your narration while this runs, so never add narration after it.
+  3. Tell the players what happens by calling narrate. It's the only way they hear you
+     mid-turn (text you write between tool calls never reaches them), and every turn needs
+     it, even one where you only look things up or keep records.
+  4. Then do the record-keeping that can't change what you said: log_event, add_lore,
+     add_item for things found or given, move_character, in the same response as the
+     narrate call so the players hear the story while they run. End the turn there,
+     without writing anything else.
+- Never mention tools, logs, notes, saving or the game server to the players. They only
+  hear the story.
 - The lore server is the truth for the world. Search it before describing an
   established place, person, faction or past event, and record anything new you invent
   that should stay consistent (with add_lore). Record story beats with log_event.
@@ -151,7 +188,7 @@ class Toolbox:
 
     def definitions(self) -> list[dict[str, Any]]:
         assert self._definitions is not None, "open a session first"
-        return self._definitions
+        return [NARRATE_TOOL, *self._definitions]
 
 
 class ToolSession:
@@ -229,11 +266,14 @@ class GameMaster:
         Yields {"type": "text", "text"} deltas, {"type": "tool", "name"} as tools run, and
         finally {"type": "done", "text"} with the narration of this turn."""
         narration: list[str] = []
+        after_records = False
+        nudged = False
         async with self._toolbox.session(user) as tools:
             for _ in range(MAX_ROUNDS):
                 final = None
                 for attempt in range(3):
-                    round_ = _Round(self._request(model or self._model, system, messages), narration)
+                    round_ = _Round(self._request(model or self._model, system, messages), narration,
+                                    mute=after_records)
                     try:
                         async for event in round_:
                             yield event
@@ -257,17 +297,27 @@ class GameMaster:
                     continue
                 tool_uses = [b for b in content if b["type"] == "tool_use"]
                 if not tool_uses:
+                    if not "".join(narration).strip() and not nudged:
+                        # The turn ended without a word to the players: ask once more.
+                        nudged = True
+                        messages.append({"role": "user", "content": NO_NARRATION_NUDGE})
+                        continue
                     break
                 truncated = final.stop_reason == "max_tokens"
                 results = await asyncio.gather(*(
                     self._run_tool(tools, b, truncated) for b in tool_uses
                 ))
                 messages.append({"role": "user", "content": list(results)})
+                after_records = bool("".join(narration).strip()) and all(
+                    b["name"] in RECORD_TOOLS | {NARRATE} for b in tool_uses)
             else:
                 yield {"type": "error", "text": "The Game Master lost the thread; ask again."}
         yield {"type": "done", "text": "".join(narration).strip()}
 
     async def _run_tool(self, tools: ToolSession, block: dict[str, Any], truncated: bool) -> dict[str, Any]:
+        if block["name"] == NARRATE and not truncated:
+            # Already streamed to the players as it was written.
+            return {"type": "tool_result", "tool_use_id": block["id"], "content": "The players heard it."}
         if truncated:
             result, is_error = "Tool input was cut off; call the tool again.", True
         else:
@@ -301,10 +351,12 @@ class GameMaster:
 class _Round:
     """One streamed model response: iterate for UI events, then read `.final`."""
 
-    def __init__(self, stream_manager, narration: list[str]):
+    def __init__(self, stream_manager, narration: list[str], mute: bool = False):
         self._manager = stream_manager
         self._narration = narration
+        self._mute = mute  # keep this round's text out of the narration (see RECORD_TOOLS)
         self._new_block = False
+        self._narrating: str | None = None  # text of a narrate call streamed so far
         self.final = None
 
     def __aiter__(self):
@@ -313,16 +365,31 @@ class _Round:
     async def _events(self) -> AsyncIterator[dict[str, Any]]:
         async with self._manager as stream:
             async for event in stream:
-                if event.type == "content_block_start" and event.content_block.type == "tool_use":
-                    yield {"type": "tool", "name": event.content_block.name}
-                elif event.type == "content_block_start" and event.content_block.type == "text":
-                    self._new_block = True
-                elif event.type == "text" and event.text:
-                    if self._new_block and "".join(self._narration).strip():
-                        # Separate narration from earlier text blocks (e.g. before a tool call).
-                        self._narration.append("\n\n")
-                        yield {"type": "text", "text": "\n\n"}
-                    self._new_block = False
-                    self._narration.append(event.text)
-                    yield {"type": "text", "text": event.text}
+                if event.type == "content_block_start":
+                    self._narrating = None
+                    if event.content_block.type == "tool_use" and event.content_block.name == NARRATE:
+                        self._narrating, self._new_block = "", True
+                    elif event.content_block.type == "tool_use":
+                        yield {"type": "tool", "name": event.content_block.name}
+                    elif event.content_block.type == "text":
+                        self._new_block = True
+                elif event.type == "input_json" and self._narrating is not None:
+                    snapshot = event.snapshot if isinstance(event.snapshot, dict) else {}
+                    text = snapshot.get("text") if isinstance(snapshot.get("text"), str) else ""
+                    if len(text) > len(self._narrating) and text.startswith(self._narrating):
+                        delta, self._narrating = text[len(self._narrating):], text
+                        for out in self._say(delta):
+                            yield out
+                elif event.type == "text" and event.text and not self._mute:
+                    for out in self._say(event.text):
+                        yield out
             self.final = await stream.get_final_message()
+
+    def _say(self, text: str):
+        if self._new_block and "".join(self._narration).strip():
+            # Separate this from narration earlier in the turn.
+            self._narration.append("\n\n")
+            yield {"type": "text", "text": "\n\n"}
+        self._new_block = False
+        self._narration.append(text)
+        yield {"type": "text", "text": text}
