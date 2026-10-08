@@ -98,7 +98,7 @@ document.querySelectorAll(".mode button").forEach((b) => b.addEventListener("cli
 
 function showView(name) {
   for (const view of ["lobby", "table", "admin"]) $(view).hidden = view !== name;
-  $("admin-link").setAttribute("aria-current", name === "admin" ? "page" : "false");
+  $("admin-link").setAttribute("aria-pressed", String(name === "admin"));
 }
 
 async function showLobby() {
@@ -496,7 +496,8 @@ async function showAdmin() {
   }
 }
 
-$("admin-link").addEventListener("click", showAdmin);
+// A toggle: clicking it again leaves admin for the default (lobby) view.
+$("admin-link").addEventListener("click", () => ($("admin").hidden ? showAdmin() : showLobby()));
 
 document.querySelectorAll(".tabs button").forEach((tab) =>
   tab.addEventListener("click", () => {
