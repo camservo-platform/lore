@@ -166,7 +166,8 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
         player: str | None = None,
     ) -> dict[str, Any]:
         """Creates a character at full HP. `player` is the owning user's username; omit it for NPCs.
-        `defense` is how hard the character is to hit; `attributes` maps stat names to scores."""
+        `defense` is how hard the character is to hit; `attributes` maps stat names to scores
+        (e.g. {"strength": 12, "agility": 14})."""
         if max_hp < 1:
             raise ToolError("max_hp must be at least 1.")
         st = state(ctx)

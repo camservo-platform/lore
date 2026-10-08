@@ -19,7 +19,7 @@ from lore.events import EventBus
 from lore.settings import Settings
 
 # Set by the ingress (Traefik basicAuth headerField) to the authenticated username.
-# In-cluster callers don't go through the ingress and are recorded as "gm".
+# In-cluster callers don't go through the ingress and are recorded as "gm" (the Game Master).
 USER_HEADER = "x-lore-user"
 DEFAULT_ACTOR = "gm"
 
