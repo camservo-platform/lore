@@ -61,6 +61,8 @@ TICKET_TTL = 60
 LINES_KEPT = 200
 LOCK_TTL = 600
 KICKOFF = "(I've just sat down at the table and I'm ready to play.)"
+# Marks a turn the player set to "Ask the GM" (see gm.SYSTEM on out-of-character asides).
+OUT_OF_CHARACTER = "out of character, to the Game Master"
 
 
 @dataclass(frozen=True)
@@ -474,20 +476,23 @@ def create_app(drain: Drain | None = None) -> Starlette:
     async def play_turn(
         table: Table, turn_id: str, campaign: str, user: str, said: str, mode: str,
         emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None = None, intro: bool = False,
+        aside: bool = False,
     ) -> None:
         """Runs one GM turn under an already-acquired lock, streaming events to `emit`.
         `said` is what the player said (shown in their lines); `note` is extra context
-        for the GM only, such as that they interrupted. A deploy waits for it to finish."""
+        for the GM only, such as that they interrupted; `aside` marks an out-of-character
+        question to the GM. A deploy waits for it to finish."""
         with drain.hold():
-            await _play_turn(table, turn_id, campaign, user, said, mode, emit, note, intro)
+            await _play_turn(table, turn_id, campaign, user, said, mode, emit, note, intro, aside)
 
     async def _play_turn(
         table: Table, turn_id: str, campaign: str, user: str, said: str, mode: str,
-        emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None, intro: bool,
+        emit: Callable[[dict[str, Any]], Awaitable[None]], note: str | None, intro: bool, aside: bool,
     ) -> None:
         text = said or KICKOFF
-        if note:
-            text = f"({note}) {text}"
+        notes = [n for n in (note, OUT_OF_CHARACTER if aside and said else None) if n]
+        if notes:
+            text = f"({'; '.join(notes)}) {text}"
         saved = await table.load()
         messages = _complete_history(saved["messages"])
         current = instructions_version(campaign)
@@ -537,10 +542,12 @@ def create_app(drain: Drain | None = None) -> Starlette:
             await table.save(_complete_history(messages), mode, system, version)
             await redis.delete(table.lock)
             if reply:
+                aside = aside and bool(said)
                 lines = ([{"role": "player", "text": said}] if said else []) + [{"role": "gm", "text": reply}]
-                await table.add_lines(user, *lines)
+                await table.add_lines(user, *({**line, "aside": True} if aside else line for line in lines))
                 await redis.xadd(
-                    table.chat, {"turn": turn_id, "user": user, "message": said or text, "reply": reply},
+                    table.chat, {"turn": turn_id, "user": user, "message": said or text, "reply": reply,
+                                 "aside": "1" if aside else ""},
                     maxlen=200, approximate=True,
                 )
 
@@ -567,7 +574,7 @@ def create_app(drain: Drain | None = None) -> Starlette:
         async def run() -> None:
             try:
                 await play_turn(table, turn_id, body["campaign"], user, (body.get("message") or "").strip(), mode,
-                                queue.put, intro=bool(body.get("intro")))
+                                queue.put, intro=bool(body.get("intro")), aside=bool(body.get("aside")))
             except Exception as e:
                 # Failures inside the GM loop are reported there; this catches the rest so the
                 # player sees an error instead of a reply that silently never comes.
@@ -621,18 +628,19 @@ def create_app(drain: Drain | None = None) -> Starlette:
         table = Table(redis, info["campaign_id"])
         await ws.accept()
 
-        async def play(said: str, interrupted: bool, emit) -> None:
+        async def play(utterance: conversation.Utterance, emit) -> None:
             turn_id = uuid.uuid4().hex
-            await emit({"type": "turn", "id": turn_id, "said": said})
+            await emit({"type": "turn", "id": turn_id, "said": utterance.said, "aside": utterance.aside})
             # Spoken turns wait for another player's turn to finish instead of failing.
             if not await acquire_turn(table, turn_id, wait=120):
                 await emit({"type": "error", "text": "The Game Master is still busy with another player."})
                 return
-            note = "I'm interrupting you" if interrupted else None
+            note = "I'm interrupting you" if utterance.interrupted else None
             # Shielded: if this player hangs up mid-turn, the turn still completes cleanly.
-            await asyncio.shield(in_background(
-                play_turn(table, turn_id, campaign, user, said, "speech", emit, note=note)
-            ))
+            await asyncio.shield(in_background(play_turn(
+                table, turn_id, campaign, user, utterance.said, "speech", emit, note=note,
+                intro=utterance.intro, aside=utterance.aside,
+            )))
 
         log.info("voice session started: %s at %s", user, campaign)
         started = asyncio.get_running_loop().time()

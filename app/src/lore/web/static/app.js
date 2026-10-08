@@ -9,6 +9,7 @@ const state = {
   campaign: null,      // {id, name, setting}
   beforeAdmin: null,   // the campaign open when admin was toggled on
   busy: false,
+  aside: false,        // "Ask the GM": the player's next turns are out of character
   myTurns: new Set(),  // turn ids started from this tab (skip their echo on the feed)
   feed: null,
   voice: null,         // the GM's TTS voice (null: server default)
@@ -219,7 +220,9 @@ $("forge").addEventListener("submit", async (e) => {
 // ---------- table ---------------------------------------------------------------------
 
 async function enterCampaign(campaign, fresh) {
+  talk.introFor = null;  // an opening turn still waiting belongs to the world we're leaving
   talk.stop();
+  setAside(false);  // every table starts in the story
   if (state.campaign?.id !== campaign.id) state.sheets.clear();
   state.campaign = campaign;
   showView("table");
@@ -230,9 +233,13 @@ async function enterCampaign(campaign, fresh) {
   const lines = fresh ? [] : await recentLines(campaign);
   await refreshState();
   if (fresh) {
-    takeTurn("", { intro: true });  // a quick how-to-play, then the opening scene and starter quest
+    // A quick how-to-play, then the opening scene and starter quest. Spoken over a live
+    // conversation when we can, so the player can talk over it like any other reply.
+    if (!(state.mode === "speech" && await talk.start({ intro: true }))) takeTurn("", { intro: true });
   } else if (lines.length) {
-    for (const line of lines) addMessage(line.role, line.text, line.role === "player" ? state.user : undefined);
+    for (const line of lines) {
+      addMessage(line.role, line.text, line.role === "player" ? state.user : undefined, { aside: line.aside });
+    }
   } else {
     addMessage("gm", state.mode === "speech"
       ? "Welcome back. Start the conversation and speak to continue, or ask for a recap."
@@ -250,10 +257,10 @@ async function recentLines(campaign) {
   }
 }
 
-function addMessage(kind, text, who) {
+function addMessage(kind, text, who, { aside = false } = {}) {
   const el = document.createElement("div");
-  el.className = `msg ${kind}`;
-  if (who) el.innerHTML = `<div class="who">${escapeHtml(who)}</div>`;
+  el.className = `msg ${kind}${aside ? " aside" : ""}`;
+  if (who) el.innerHTML = `<div class="who">${escapeHtml(who)}${aside ? " · to the GM" : ""}</div>`;
   const body = document.createElement("div");
   body.className = "body";
   if (kind === "gm") body.innerHTML = renderMarkdown(text);
@@ -286,8 +293,9 @@ function setBusy(busy) {
 async function takeTurn(message, { intro = false } = {}) {
   if (state.busy || !state.campaign) return;
   setBusy(true);
-  if (message) addMessage("player", message, state.user);
-  const gm = addMessage("gm", "");
+  const aside = state.aside && Boolean(message);  // an empty message asks for a recap: in the story
+  if (message) addMessage("player", message, state.user, { aside });
+  const gm = addMessage("gm", "", undefined, { aside });
   gm.classList.add("streaming");
   const body = gm.querySelector(".body");
   let text = "";
@@ -295,7 +303,7 @@ async function takeTurn(message, { intro = false } = {}) {
   speaker.begin();
   try {
     await retryWhileRestarting(() => postStream(`/api/campaigns/${state.campaign.id}/turn`,
-      { campaign: state.campaign.name, message, mode: state.mode, intro },
+      { campaign: state.campaign.name, message, mode: state.mode, intro, aside },
       (ev) => {
         if (ev.type === "turn") state.myTurns.add(ev.id);
         else if (ev.type === "text") {
@@ -512,8 +520,9 @@ function openFeed(resume = false) {
       clearTimeout(openFeed.refresh);
       openFeed.refresh = setTimeout(refreshState, 800);
     } else if (ev.type === "chat" && !state.myTurns.has(ev.turn)) {
-      addMessage("player", ev.message, ev.user);
-      addMessage("gm", ev.reply);
+      const aside = ev.aside === "1";
+      addMessage("player", ev.message, ev.user, { aside });
+      addMessage("gm", ev.reply, undefined, { aside });
       if (state.mode === "speech" && !ev.replay) { speaker.begin(); speaker.feed(ev.reply); speaker.flush(); }
     }
   };
@@ -703,9 +712,13 @@ const talk = {
   stream: null,
   gm: null,      // the GM message being streamed
   gmText: "",
-  async start() {
-    if (this.active || !state.campaign) return;
+  introFor: null, // campaign id whose opening turn we'll ask for once the session is ready
+  // Resolves true once the mic and socket are up. With intro, the session asks for the
+  // world's opening turn when ready; if it fails before that, stop() falls back to text.
+  async start({ intro = false } = {}) {
+    if (this.active || !state.campaign) return false;
     this.active = true;
+    this.introFor = intro ? state.campaign.id : null;
     this.setUi("Connecting…");
     try {
       await this.connect();
@@ -713,6 +726,12 @@ const talk = {
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
       });
       this.ctx = new AudioContext();
+      // Started without a fresh click (after forging a world), some browsers keep the
+      // context suspended: the mic would be silently dead, so give up instead.
+      if (this.ctx.state !== "running") {
+        await Promise.race([this.ctx.resume(), sleep(1000)]);
+        if (this.ctx.state !== "running") throw new Error("the browser wants a click before using the microphone");
+      }
       const url = URL.createObjectURL(new Blob([PCM_WORKLET], { type: "application/javascript" }));
       await this.ctx.audioWorklet.addModule(url);
       URL.revokeObjectURL(url);
@@ -722,9 +741,12 @@ const talk = {
       mute.gain.value = 0;  // keeps the worklet pulled by the graph without playing the mic back
       this.ctx.createMediaStreamSource(this.stream).connect(node).connect(mute).connect(this.ctx.destination);
     } catch (e) {
-      toast(`Couldn't start the conversation: ${e.message}`);
+      if (!this.introFor) toast(`Couldn't start the conversation: ${e.message}`);
+      this.introFor = null;  // the caller falls back to an unspoken-over opening turn
       this.stop();
+      return false;
     }
+    return true;
   },
   // Opens the socket (a fresh one-time ticket each time); the mic and audio graph carry
   // over, since the worklet always sends to the current this.ws.
@@ -740,6 +762,10 @@ const talk = {
     await new Promise((resolve, reject) => {
       ws.onopen = () => {
         ws.onclose = (e) => this.dropped(ws, e);
+        // The GM may already be talking (a reply that began before we connected): say so,
+        // or the server won't treat talking over it as an interruption.
+        this.playback(speaker.speaking);
+        this.sendAside();
         resolve();
       };
       ws.onclose = () => reject(new Error("couldn't open the voice connection"));
@@ -773,6 +799,9 @@ const talk = {
   stop() {
     if (!this.active) return;
     this.active = false;
+    // Hung up (or failed) before the opening turn was asked for: play it without the mic.
+    const intro = this.introFor === state.campaign?.id;
+    this.introFor = null;
     try { this.ws?.readyState === WebSocket.OPEN && this.ws.send(JSON.stringify({ type: "stop" })); } catch {}
     this.ws?.close();
     this.stream?.getTracks().forEach((t) => t.stop());
@@ -781,19 +810,28 @@ const talk = {
     this.finishReply();
     this.caption("");
     this.setUi(null);
+    if (intro) takeTurn("", { intro: true });
   },
   playback(speaking) {
     if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "playback", speaking }));
   },
+  sendAside() {
+    if (this.ws?.readyState === WebSocket.OPEN) this.ws.send(JSON.stringify({ type: "aside", on: state.aside }));
+  },
   handle(ev) {
-    if (ev.type === "ready") this.setUi("Listening…");
+    if (ev.type === "ready") {
+      this.setUi("Listening…");
+      if (this.introFor === state.campaign?.id) this.ws.send(JSON.stringify({ type: "intro" }));
+      this.introFor = null;
+    }
     else if (ev.type === "heard") this.caption(ev.final ? "" : ev.text);
     else if (ev.type === "barge_in") speaker.stop();
     else if (ev.type === "turn") {
       this.finishReply();
       state.myTurns.add(ev.id);
-      if (ev.said) addMessage("player", ev.said, state.user);
-      this.gm = addMessage("gm", "");
+      const aside = Boolean(ev.aside && ev.said);
+      if (ev.said) addMessage("player", ev.said, state.user, { aside });
+      this.gm = addMessage("gm", "", undefined, { aside });
       this.gm.classList.add("streaming");
       this.gmText = "";
       speaker.begin();
@@ -827,6 +865,7 @@ const talk = {
     el.hidden = !text;
   },
   setUi(status) {
+    awake.update();
     $("mic").setAttribute("aria-pressed", String(this.active));
     $("mic-label").textContent = this.active ? "End conversation" : "Start conversation";
     $("talk-status").textContent = status || "";
@@ -834,6 +873,68 @@ const talk = {
 };
 
 $("mic").addEventListener("click", () => (talk.active ? talk.stop() : talk.start()));
+
+// ---------- Act / Ask the GM ---------------------------------------------------------
+
+// Act: what your character does or says. Ask the GM: an out-of-character question (rules,
+// options, a recap) that the GM answers without moving the story. Applies to typed and
+// spoken turns alike; a spoken turn takes the setting it had when you finished talking.
+function setAside(aside) {
+  state.aside = aside;
+  document.querySelectorAll("#speaking-as button").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.aside === String(aside))));
+  $("message").placeholder = aside ? "Ask the Game Master…" : "What do you do?";
+  talk.sendAside();
+}
+
+document.querySelectorAll("#speaking-as button").forEach((b) => b.addEventListener("click", () => setAside(b.dataset.aside === "true")));
+
+// ---------- full screen and staying awake ---------------------------------------------
+
+// Keeps the screen (and so the computer) awake while in full screen or in a voice
+// conversation: a sleeping machine drops the mic and the GM mid-scene. The browser
+// releases the lock whenever the tab is hidden, so it's taken again on return.
+const awake = {
+  lock: null,
+  busy: false,
+  async update() {
+    if (this.busy || !("wakeLock" in navigator)) return;
+    const want = document.visibilityState === "visible" && Boolean(document.fullscreenElement || talk.active);
+    if (want === Boolean(this.lock)) return;
+    this.busy = true;
+    try {
+      if (want) {
+        const lock = await navigator.wakeLock.request("screen");
+        lock.addEventListener("release", () => { if (this.lock === lock) this.lock = null; });
+        this.lock = lock;
+      } else {
+        const lock = this.lock;
+        this.lock = null;
+        await lock.release();
+      }
+    } catch {
+      // Refused (battery saver, policy): the page still works, the screen just may sleep.
+    } finally {
+      this.busy = false;
+    }
+    // Things may have changed while we waited on the browser (not just a refusal: no retry loop).
+    const now = document.visibilityState === "visible" && Boolean(document.fullscreenElement || talk.active);
+    if (now !== want) this.update();
+  },
+};
+
+document.addEventListener("visibilitychange", () => awake.update());
+document.addEventListener("fullscreenchange", () => {
+  const on = Boolean(document.fullscreenElement);
+  $("fullscreen").setAttribute("aria-pressed", String(on));
+  $("fullscreen").textContent = on ? "Exit full screen" : "Full screen";
+  awake.update();
+});
+// Not every browser can put a page in full screen (iPhone Safari can't).
+$("fullscreen").hidden = !document.fullscreenEnabled;
+$("fullscreen").addEventListener("click", () => {
+  const request = document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen();
+  request.catch((e) => toast(`Couldn't change full screen: ${e.message}`));
+});
 
 // ---------- GM voice -----------------------------------------------------------------
 

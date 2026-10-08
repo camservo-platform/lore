@@ -122,6 +122,12 @@ form#forge label { display: grid; gap: 4px; font-weight: 500; }
 @keyframes blink { 50% { opacity: 0; } }
 .activity { color: var(--muted); font-style: italic; font-size: 13px; padding: 4px; }
 
+.speaking-as { display: flex; justify-content: center; padding-top: 10px; border-top: 1px solid var(--line); }
+.speaking-as + .composer, .speaking-as ~ .talk { border-top: 0; }
+/* Out-of-character exchanges with the GM: plainer and quieter than the story. */
+.msg.aside { border-left: 3px solid var(--line); padding-left: 10px; }
+.msg.player.aside { border-left: 0; outline: 1px dashed var(--line); background: none; }
+.msg.gm.aside .body { font: 400 15px/1.55 var(--sans); color: var(--muted); }
 .composer { display: flex; gap: 10px; align-items: flex-end; padding-top: 10px; border-top: 1px solid var(--line); }
 .composer textarea { flex: 1; min-height: 44px; max-height: 160px; }
 .talk { display: grid; justify-items: center; gap: 4px; padding: 14px 0 4px; border-top: 1px solid var(--line); }
@@ -197,10 +203,11 @@ form#forge label { display: grid; gap: 4px; font-weight: 500; }
 }
 
 /* admin */
-.admin-link {
+.admin-link, .pill-button {
   background: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; cursor: pointer; color: var(--muted); font-weight: 500;
 }
-.admin-link[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.pill-button:hover { color: var(--ink); border-color: var(--accent); }
+.admin-link[aria-pressed="true"], .pill-button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .admin {
   flex: 1; min-height: 0; display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 20px;
   padding: 20px; max-width: 1400px; width: 100%; margin: 0 auto;

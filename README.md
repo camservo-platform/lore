@@ -184,10 +184,23 @@ Open `https://<host>/` and sign in.
   and name (leave both blank and the Game Master invents an original world), has Claude
   write the setting, an opening scene and 12-16 linked lore entries, records them through
   the MCP servers, and drops you into the first scene (about a minute).
-- **Text / Speech** (top right, remembered per browser). Speech mode records with the
-  mic button or by holding the space bar, transcribes with Deepgram, and reads the Game
-  Master's reply aloud sentence by sentence as it streams. The GM is told which mode the
-  table is in and writes for the ear in speech mode.
+- **Text / Speech** (top right, remembered per browser). Speech mode is a hands-free
+  conversation (**Start conversation**): Deepgram Flux transcribes as you talk, the GM
+  answers when you pause, and its reply is read aloud sentence by sentence as it
+  streams. Talking over the GM stops its voice and your words become the next turn. A
+  newly forged world starts the conversation by itself, so you can interrupt the
+  how-to-play and opening scene too; if the mic can't start (permission denied, or the
+  browser wants a click first), the opening plays without it. The GM is told which mode
+  the table is in and writes for the ear in speech mode.
+- **Act / Ask the GM** (above the text box and the conversation button). Act is the
+  story: what your character does or says. Ask the GM steps outside it: rules, options,
+  a recap, what your character knows. The GM answers plainly, no time passes and
+  nothing changes in the game. It works for typed and spoken turns (a spoken turn uses
+  the setting it had when you stopped talking). Each table starts on Act, and
+  out-of-character exchanges are shown in a plainer style in the transcript.
+- **Full screen** (top bar, where the browser supports it). The screen, and so the
+  computer, is kept awake (Screen Wake Lock) while in full screen or in a voice
+  conversation, so a long scene isn't cut off by sleep.
 - The **Party** and **Chronicle** panels update live from the event stream. Other
   players at the same campaign see each other's turns as they finish.
 - **New conversation** clears the GM's conversation memory for that campaign (the world,

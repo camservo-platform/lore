@@ -18,6 +18,7 @@
         <button role="radio" data-mode="text" aria-checked="true">Text</button>
         <button role="radio" data-mode="speech" aria-checked="false">Speech</button>
       </div>
+      <button class="pill-button" id="fullscreen" aria-pressed="false" title="Full screen; keeps the screen awake (Esc to leave)" hidden>Full screen</button>
       <button class="admin-link" id="admin-link" aria-pressed="false" hidden>Admin</button>
       <button class="user-menu" id="user" title="Sign out"></button>
     </div>
@@ -51,6 +52,12 @@
       <div class="transcript" id="transcript" aria-live="polite"></div>
       <div class="activity" id="activity" hidden></div>
 
+      <div class="speaking-as">
+        <div class="mode" id="speaking-as" role="radiogroup" aria-label="Who you're speaking as">
+          <button role="radio" data-aside="false" aria-checked="true" title="What your character does or says, in the story">Act</button>
+          <button role="radio" data-aside="true" aria-checked="false" title="Step out of the story to ask the Game Master: rules, options, a recap">Ask the GM</button>
+        </div>
+      </div>
       <form class="composer" id="composer" data-mode="text">
         <textarea id="message" rows="2" placeholder="What do you do?"></textarea>
         <button type="submit" class="primary" id="send">Send</button>

@@ -8,6 +8,11 @@ browser to stop playback at once ("barge-in"); what they say is queued and sent 
 next turn, flagged as an interruption. The interrupted GM turn still completes, so game
 state is never left half-applied.
 
+A world's opening turn (how-to-play, opening scene, starter quest) is asked for over the
+same socket, so the player can talk over it like any other reply. The browser also says
+whether the player is acting in character or asking the GM something out of character;
+each turn takes the setting it had when the player finished speaking.
+
 The GM's own voice leaking from speakers into the mic is filtered out by comparing what
 Flux heard with what the GM has been saying.
 
@@ -21,6 +26,7 @@ import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 
 import websockets
@@ -52,9 +58,22 @@ def is_echo(heard: str, spoken: str, threshold: float = 0.75) -> bool:
     return sum(w in spoken_words for w in heard_words) / len(heard_words) >= threshold
 
 
-# play(said, interrupted, emit): runs a GM turn for what the player said, streaming its
-# events to emit. It must keep going if this session ends (the caller shields it).
-PlayTurn = Callable[[str, bool, Callable[[dict[str, Any]], Awaitable[None]]], Awaitable[None]]
+@dataclass
+class Utterance:
+    said: str
+    interrupted: bool = False  # spoken over the GM
+    intro: bool = False        # the world's opening turn, asked for by the browser
+    aside: bool = False        # out of character, to the GM rather than in the story
+
+    def join(self, other: "Utterance") -> "Utterance":
+        return Utterance(f"{self.said} {other.said}".strip(), self.interrupted or other.interrupted,
+                         self.intro or other.intro, self.aside or other.aside)
+
+
+# play(utterance, emit): runs a GM turn for what the player said (or the world's opening
+# turn), streaming its events to emit. It must keep going if this session ends (the
+# caller shields it).
+PlayTurn = Callable[[Utterance, Callable[[dict[str, Any]], Awaitable[None]]], Awaitable[None]]
 
 
 class Conversation:
@@ -66,10 +85,10 @@ class Conversation:
         self._ws = ws
         self._key = deepgram_key
         self._model = model
-        # play(turn_id, said, emit, note) runs a GM turn (waiting for the table's turn lock).
         self._play = play
         self._send_lock = asyncio.Lock()
-        self._utterances: asyncio.Queue[tuple[str, bool]] = asyncio.Queue()
+        self._utterances: asyncio.Queue[Utterance] = asyncio.Queue()
+        self._aside = False          # browser's Act / Ask the GM setting
         self._gm_speaking = False    # browser reports playback state
         self._turn_running = False
         self._gm_text = ""           # what the GM said most recently, for the echo filter
@@ -123,6 +142,10 @@ class Conversation:
                     control = json.loads(message["text"])
                     if control.get("type") == "playback":
                         self._gm_speaking = bool(control.get("speaking"))
+                    elif control.get("type") == "intro":
+                        await self._utterances.put(Utterance("", intro=True))
+                    elif control.get("type") == "aside":
+                        self._aside = bool(control.get("on"))
                     elif control.get("type") == "stop":
                         break
         except WebSocketDisconnect:
@@ -161,22 +184,21 @@ class Conversation:
                     continue
                 interrupted = self._barged_turn == index or self._turn_running
                 await self.send({"type": "heard", "text": heard, "final": True})
-                await self._utterances.put((heard.strip(), interrupted))
+                await self._utterances.put(Utterance(heard.strip(), interrupted, aside=self._aside))
 
     def _gm_busy(self) -> bool:
         return self._gm_speaking or self._turn_running
 
     async def _turns(self) -> None:
         while True:
-            said, interrupted = await self._utterances.get()
+            utterance = await self._utterances.get()
             # Anything else said meanwhile joins this turn.
             while not self._utterances.empty():
-                more, more_interrupted = self._utterances.get_nowait()
-                said, interrupted = f"{said} {more}", interrupted or more_interrupted
+                utterance = utterance.join(self._utterances.get_nowait())
             self._turn_running = True
             self._new_reply = True
             try:
-                await self._play(said, interrupted, self._emit)
+                await self._play(utterance, self._emit)
             finally:
                 self._turn_running = False
 
