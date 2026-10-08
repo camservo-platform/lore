@@ -1,6 +1,6 @@
 apiVersion: v2
 name: lore
-description: Backing services for the Lore voice GM (PostgreSQL game state, Qdrant lore vectors, CPU embeddings)
+description: Backing services for the Lore voice Game Master (PostgreSQL + pgvector game state and lore, Redis, CPU embeddings, MCP servers)
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

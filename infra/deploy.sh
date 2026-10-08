@@ -44,7 +44,8 @@ kc()   { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
 hm()   { helm --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
-rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1"; }
+# `|| true`: tr dies of SIGPIPE when head has enough, which pipefail would report as failure.
+rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1" || true; }
 
 # Images are tagged by commit; deploy the newest commit that changed the app.
 app_tag() {
@@ -85,7 +86,7 @@ ensure_secrets() {
   local key
   kc get secret "$SECRET" >/dev/null 2>&1 || kc create secret generic "$SECRET" >/dev/null
   kc get secret "$USERS_SECRET" >/dev/null 2>&1 \
-    || kc create secret generic "$USERS_SECRET" --from-literal=users= >/dev/null
+    || kc create secret generic "$USERS_SECRET" --from-literal=users="$(locked_user)" >/dev/null
   for key in postgres-password redis-password; do
     if ! has_secret_key "$key"; then
       log "Generating $key"
@@ -168,14 +169,22 @@ cmd_secret() {
 }
 
 # Users live in the users secret as htpasswd lines (bcrypt), the format Traefik reads.
+# Traefik rejects a basic-auth middleware with no users (dropping the routes, so 404s),
+# so an empty list holds one placeholder whose password was never kept.
+LOCKED_USER=_locked
+
+locked_user() { htpasswd -nbB "$LOCKED_USER" "$(rand 32)"; }
+
 users_file() { secret_value "$USERS_SECRET" users; }
 
 write_users() {
-  put_secret_key "$USERS_SECRET" users "$1"
+  local users
+  users="$(grep -v "^$LOCKED_USER:" <<<"$1" | sed '/^$/d' || true)"
+  put_secret_key "$USERS_SECRET" users "${users:-$(locked_user)}"
 }
 
 cmd_users() {
-  users_file | cut -d: -f1 | sed '/^$/d'
+  users_file | cut -d: -f1 | grep -v "^$LOCKED_USER$" | sed '/^$/d' || true
 }
 
 cmd_add_user() {

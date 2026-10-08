@@ -19,7 +19,7 @@ credentialsSecret: lore-credentials
 # htpasswd-format users allowed through the ingress (./deploy.sh add-user <name>).
 usersSecret: lore-users
 
-# Hosted LLM used for world generation and the GM itself. Only exposed to the app
+# Hosted LLM used for world generation and the Game Master itself. Only exposed to the app
 # through the lore-config ConfigMap; nothing in this chart calls it.
 llm:
   provider: anthropic
