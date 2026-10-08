@@ -87,7 +87,9 @@ async function api(path, options = {}) {
   if (!resp.ok) {
     let detail = resp.statusText;
     try { detail = (await resp.json()).detail || detail; } catch {}
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = resp.status;
+    throw err;
   }
   return resp;
 }
@@ -292,7 +294,7 @@ async function takeTurn(message) {
   setActivity("thinking");
   speaker.begin();
   try {
-    await postStream(`/api/campaigns/${state.campaign.id}/turn`,
+    await retryWhileRestarting(() => postStream(`/api/campaigns/${state.campaign.id}/turn`,
       { campaign: state.campaign.name, message, mode: state.mode },
       (ev) => {
         if (ev.type === "turn") state.myTurns.add(ev.id);
@@ -307,7 +309,7 @@ async function takeTurn(message) {
           if (state.mode === "speech") speaker.flush();
           setActivity(TOOL_VERBS[ev.name] || "working");
         } else if (ev.type === "error") addMessage("error", ev.text);
-      });
+      }));
   } catch (err) {
     addMessage("error", err.message);
   } finally {
@@ -317,6 +319,21 @@ async function takeTurn(message) {
     setActivity("");
     setBusy(false);
     refreshState();
+  }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A server that's restarting for a deploy refuses new work with 503 before doing any of
+// it, so trying again (once traffic has moved to the new one) is safe.
+async function retryWhileRestarting(fn, attempts = 4) {
+  for (let i = 1; ; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (err.status !== 503 || i >= attempts) throw err;
+      await sleep(1000 * i);
+    }
   }
 }
 
@@ -465,12 +482,21 @@ function eventItem(ev, fresh) {
   return li;
 }
 
-// Live updates: game events from anyone, and turns taken by other players.
-function openFeed() {
+// Live updates: game events from anyone, and turns taken by other players. The feed
+// resumes where it left off after a reconnect (say, a deploy moving us to a new server):
+// the browser sends the last id itself, and `resume` does the same when we reopen it.
+function openFeed(resume = false) {
   closeFeed();
-  const feed = new EventSource(`/api/campaigns/${state.campaign.id}/feed`);
+  if (!resume) state.feedLast = null;
+  const last = state.feedLast ? `?last=${encodeURIComponent(state.feedLast)}` : "";
+  const feed = new EventSource(`/api/campaigns/${state.campaign.id}/feed${last}`);
   feed.onmessage = (msg) => {
+    if (msg.lastEventId) state.feedLast = msg.lastEventId;
     const ev = JSON.parse(msg.data);
+    if (ev.type === "hello") {
+      if (ev.resumed) refreshState();  // catch up on anything older than the stream keeps
+      return;
+    }
     if (ev.type === "event" && ev.event.type === "campaign_deleted") {
       toast(ev.event.summary);
       showLobby();
@@ -480,7 +506,7 @@ function openFeed() {
       state.campaign.name = ev.event.data.new;
       $("campaign-title").textContent = state.campaign.name;
     }
-    if (ev.type === "event" && ev.event.type === "roll") rollCard(ev.event);
+    if (ev.type === "event" && ev.event.type === "roll" && !ev.replay) rollCard(ev.event);
     if (ev.type === "event") {
       $("log").prepend(eventItem(ev.event, true));
       clearTimeout(openFeed.refresh);
@@ -488,8 +514,14 @@ function openFeed() {
     } else if (ev.type === "chat" && !state.myTurns.has(ev.turn)) {
       addMessage("player", ev.message, ev.user);
       addMessage("gm", ev.reply);
-      if (state.mode === "speech") { speaker.begin(); speaker.feed(ev.reply); speaker.flush(); }
+      if (state.mode === "speech" && !ev.replay) { speaker.begin(); speaker.feed(ev.reply); speaker.flush(); }
     }
+  };
+  // EventSource retries dropped streams by itself, but gives up for good on an error
+  // response (a proxy's 502 mid-deploy, say), so reopen it.
+  feed.onerror = () => {
+    if (feed.readyState !== EventSource.CLOSED || state.feed !== feed) return;
+    setTimeout(() => state.feed === feed && openFeed(true), 2000);
   };
   state.feed = feed;
 }
@@ -676,20 +708,9 @@ const talk = {
     this.active = true;
     this.setUi("Connecting…");
     try {
-      const { ticket } = await (await api("/api/voice/ticket", {
-        method: "POST", body: JSON.stringify({ campaign_id: state.campaign.id, campaign: state.campaign.name }),
-      })).json();
+      await this.connect();
       this.stream = await navigator.mediaDevices.getUserMedia({
         audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-      });
-      const scheme = location.protocol === "https:" ? "wss" : "ws";
-      this.ws = new WebSocket(`${scheme}://${location.host}/ws/voice?ticket=${ticket}`);
-      this.ws.binaryType = "arraybuffer";
-      this.ws.onmessage = (msg) => this.handle(JSON.parse(msg.data));
-      this.ws.onclose = () => this.stop();
-      await new Promise((resolve, reject) => {
-        this.ws.onopen = resolve;
-        this.ws.onerror = () => reject(new Error("couldn't open the voice connection"));
       });
       this.ctx = new AudioContext();
       const url = URL.createObjectURL(new Blob([PCM_WORKLET], { type: "application/javascript" }));
@@ -702,6 +723,50 @@ const talk = {
       this.ctx.createMediaStreamSource(this.stream).connect(node).connect(mute).connect(this.ctx.destination);
     } catch (e) {
       toast(`Couldn't start the conversation: ${e.message}`);
+      this.stop();
+    }
+  },
+  // Opens the socket (a fresh one-time ticket each time); the mic and audio graph carry
+  // over, since the worklet always sends to the current this.ws.
+  async connect() {
+    const { ticket } = await (await retryWhileRestarting(() => api("/api/voice/ticket", {
+      method: "POST", body: JSON.stringify({ campaign_id: state.campaign.id, campaign: state.campaign.name }),
+    }))).json();
+    const scheme = location.protocol === "https:" ? "wss" : "ws";
+    const ws = new WebSocket(`${scheme}://${location.host}/ws/voice?ticket=${ticket}`);
+    ws.binaryType = "arraybuffer";
+    ws.onmessage = (msg) => this.handle(JSON.parse(msg.data));
+    this.ws = ws;
+    await new Promise((resolve, reject) => {
+      ws.onopen = () => {
+        ws.onclose = (e) => this.dropped(ws, e);
+        resolve();
+      };
+      ws.onclose = () => reject(new Error("couldn't open the voice connection"));
+    });
+  },
+  // The server closes with 1012 when it restarts for a deploy (after any reply in
+  // progress), and connections can drop for other reasons too: reconnect quietly.
+  async dropped(ws, e) {
+    if (!this.active || ws !== this.ws) return;  // we hung up, or already reconnected
+    if (e.code === 4401) {
+      toast("The voice connection was refused.");
+      this.stop();
+      return;
+    }
+    this.finishReply();
+    this.caption("");
+    this.setUi("Reconnecting…");
+    for (let i = 0; i < 5 && this.active; i++) {
+      await sleep(i ? 1000 * 2 ** (i - 1) : 250);
+      if (!this.active) return;
+      try {
+        await this.connect();
+        return;
+      } catch {}
+    }
+    if (this.active) {
+      toast("Lost the voice connection.");
       this.stop();
     }
   },

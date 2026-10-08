@@ -10,6 +10,10 @@ state is never left half-applied.
 
 The GM's own voice leaking from speakers into the mic is filtered out by comparing what
 Flux heard with what the GM has been saying.
+
+When the server starts draining for a deploy, the session waits until the player isn't
+mid-sentence and no turn is running, then tells the browser to reconnect (it lands on
+the new pod).
 """
 
 import asyncio
@@ -56,7 +60,9 @@ PlayTurn = Callable[[str, bool, Callable[[dict[str, Any]], Awaitable[None]]], Aw
 class Conversation:
     """One player's live voice session at one table."""
 
-    def __init__(self, ws: WebSocket, deepgram_key: str, model: str, play: PlayTurn):
+    def __init__(
+        self, ws: WebSocket, deepgram_key: str, model: str, play: PlayTurn, draining: asyncio.Event | None = None,
+    ):
         self._ws = ws
         self._key = deepgram_key
         self._model = model
@@ -70,6 +76,8 @@ class Conversation:
         self._new_reply = False
         self._barged_turn: int | None = None
         self._closed = False
+        self._hearing = False        # the player is mid-turn (Flux started one, not ended it)
+        self._draining = draining
 
     async def send(self, message: dict[str, Any]) -> None:
         if self._closed:
@@ -88,6 +96,20 @@ class Conversation:
                 tasks.create_task(self._from_browser(flux))
                 tasks.create_task(self._from_flux(flux))
                 tasks.create_task(self._turns())
+                if self._draining is not None:
+                    tasks.create_task(self._close_when_drained())
+
+    def idle(self) -> bool:
+        """Nothing would be lost by ending the session now."""
+        return not (self._hearing or self._turn_running or not self._utterances.empty())
+
+    async def _close_when_drained(self) -> None:
+        await self._draining.wait()
+        while not self.idle():
+            await asyncio.sleep(0.25)
+        await self.send({"type": "reconnect"})
+        self._closed = True
+        raise _SessionOver
 
     async def _from_browser(self, flux) -> None:
         try:
@@ -126,12 +148,14 @@ class Conversation:
             echo = self._gm_busy() and is_echo(heard, self._gm_text)
             if event in ("StartOfTurn", "Update"):
                 if not echo:
+                    self._hearing = True
                     await self.send({"type": "heard", "text": heard})
                     if self._gm_speaking and len(words(heard)) >= BARGE_IN_WORDS and self._barged_turn != index:
                         self._barged_turn = index
                         self._gm_speaking = False
                         await self.send({"type": "barge_in"})
             elif event == "EndOfTurn":
+                self._hearing = False
                 if echo or not words(heard):
                     await self.send({"type": "heard", "text": ""})
                     continue
@@ -170,9 +194,11 @@ class _SessionOver(Exception):
     pass
 
 
-async def serve(ws: WebSocket, deepgram_key: str, model: str, play: PlayTurn) -> None:
-    """Runs a session until the browser leaves, reporting failures to it."""
-    conversation = Conversation(ws, deepgram_key, model, play)
+async def serve(
+    ws: WebSocket, deepgram_key: str, model: str, play: PlayTurn, draining: asyncio.Event | None = None,
+) -> None:
+    """Runs a session until the browser leaves (or the server drains), reporting failures to it."""
+    conversation = Conversation(ws, deepgram_key, model, play, draining)
     try:
         await conversation.run()
     except* _SessionOver:

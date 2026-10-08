@@ -25,6 +25,12 @@ metadata:
     {{- include "lore.labels" $ctx | nindent 4 }}
 spec:
   replicas: {{ $v.replicas }}
+  # Start the new pod and wait for it to be ready before retiring an old one.
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
   selector:
     matchLabels:
       {{- include "lore.selectorLabels" $ctx | nindent 6 }}
@@ -44,10 +50,18 @@ spec:
       {{- end }}
       securityContext:
         runAsNonRoot: true
+      # The old pod drains (see lore/web/drain.py): preStop, then turns get up to
+      # drain.seconds to finish, then a margin for cancelled ones to save and exit.
+      terminationGracePeriodSeconds: {{ add $v.drain.preStopSeconds $v.drain.seconds 20 }}
       containers:
         - name: web
           image: {{ include "lore.image" . }}
           command: ["python", "-m", "lore.web"]
+          lifecycle:
+            preStop:
+              # Lets Traefik stop routing new requests here before the drain starts.
+              exec:
+                command: ["sleep", "{{ $v.drain.preStopSeconds }}"]
           envFrom:
             - configMapRef:
                 name: {{ include "lore.fullname" . }}-config
@@ -79,6 +93,8 @@ spec:
                   name: {{ .Values.credentialsSecret }}
                   key: deepgram-api-key
                   optional: true
+            - name: LORE_DRAIN_SECONDS
+              value: {{ $v.drain.seconds | quote }}
           ports:
             - name: http
               containerPort: 8000

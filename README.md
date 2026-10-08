@@ -53,6 +53,7 @@ cd infra
 cp secrets.env.example secrets.env     # then fill in DEEPGRAM_API_KEY and LLM_API_KEY
 $EDITOR values.local.yaml              # ingress host + annotations (see below)
 ./deploy.sh                            # idempotent install or upgrade
+./deploy.sh deploy --now               # same, without waiting for GM turns in progress
 ./deploy.sh add-user alice             # create a login; prints the password once
 ./deploy.sh status
 ```
@@ -60,6 +61,35 @@ $EDITOR values.local.yaml              # ingress host + annotations (see below)
 `deploy.sh` deploys the image built from the newest commit that touched `app/` (or the
 `app` workflow), so push first and wait for the workflow to finish. Override with
 `APP_TAG=<sha>`; rebuild any commit with `gh workflow run app`.
+
+### Deploys and live sessions
+
+Upgrades don't cut players off. Deployments roll one pod at a time (`maxSurge: 1`,
+`maxUnavailable: 0`), so the new pod is ready before the old one stops. Game state, the
+GM conversation and the turn lock live in Postgres and Redis, so any pod can serve any
+player. The old web pod then **drains** (`app/src/lore/web/drain.py`):
+
+1. `preStop` sleeps `web.drain.preStopSeconds` (5s) while Traefik stops routing to it.
+2. On SIGTERM it stops taking new work (new turns and world forging get a 503, and the
+   browser retries) and ends live feeds. Browsers reconnect to the new pod and resume
+   from the feed's last SSE id (`<events id>,<chat id>`), so no events or turns are
+   missed. Turns missed while away appear but aren't read aloud again.
+3. Voice sessions stay open until the player isn't mid-sentence and no reply is
+   running. Then the pod closes them with code 1012 and the browser reconnects with a
+   fresh ticket, keeping the mic open.
+4. GM turns and world forging in progress run to completion, for up to
+   `web.drain.seconds` (240s). Anything still running then is cancelled cleanly: the
+   conversation is saved, the table unlocked and the player told to repeat themselves.
+   Game-state changes already made stand.
+
+To skip the wait, use `./deploy.sh deploy --now`, or `./deploy.sh hurry` while an old pod
+is still draining. Either one sends the old pods SIGUSR1, which cancels their running
+turns as in step 4 and exits right away. (A second SIGTERM does the same.)
+
+The MCP servers are stateless and their requests are short, so a preStop pause plus
+uvicorn's own graceful shutdown is enough for them. Migrations run in the new pods' init
+containers **while old pods are still serving**, so they must be backward-compatible:
+add columns or tables in one release, and drop or rename them in a later one.
 
 Example `values.local.yaml`:
 
@@ -297,6 +327,7 @@ Redis :6379, embeddings :11434 and the MCP servers on :8001 and :8002.
 ./deploy.sh embed "some text"        # smoke-test the embedding model
 ./deploy.sh logs web                 # postgres | redis | embeddings | mcp-game | mcp-lore | web
 ./deploy.sh diff                     # what an upgrade would change
+./deploy.sh hurry                    # stop old web pods still draining after a deploy
 ./deploy.sh uninstall                # keeps PVCs and secrets
 ```
 
