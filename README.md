@@ -134,9 +134,12 @@ cookie, sessions live in Redis, and admins can list and revoke them (Admin > Pla
       octocat: alice      # GitHub login -> Lore name
   ```
   Unlisted GitHub accounts are refused.
-- **Passwords.** The logins in the `lore-users` secret (bcrypt htpasswd), managed with
-  `./deploy.sh add-user | remove-user | users`. Choose "Sign in with a password" and the
-  browser asks for them; scripts can send Basic credentials on every request.
+- **Passwords.** The logins in the `lore-users` secret (bcrypt htpasswd), managed from
+  the admin page's **Users** tab or with `./deploy.sh add-user | remove-user | users`
+  (both edit the same secret). Choose "Sign in with a password" and the browser asks for
+  them; scripts can send Basic credentials on every request. For the Users tab, the web
+  pod runs as the `lore-web` service account, whose Role may only `get` and `patch`
+  that one secret (`web.manageUsers: false` removes it and makes the tab read-only).
 
 Players sign out by clicking their name. The web route has no proxy auth, and the app
 ignores any client-sent `X-Lore-User` (outside local dev).
@@ -249,6 +252,13 @@ an **Admin** button with:
 - **Players**: who has Lore open now and when everyone was last seen, where they are
   (lobby, admin, which world) and whether a voice conversation is on. There are no
   login sessions with basic auth, so "online" means the page checked in within 90 s.
+- **Users**: everyone who can sign in, how (password, GitHub), whether they're an admin
+  and how many sessions they have. Add password users, set or generate a new password
+  (a generated one is shown once), delete a login, or sign someone out everywhere.
+  Changing a password or deleting a user signs out their password sessions; their
+  characters stay. Admins and GitHub sign-ins stay in values (`web.admins`,
+  `web.githubUsers`). The pod that made a change sees it at once; other replicas, and
+  Traefik for the MCP ingress, within about a minute.
 - **Tables**: each world's GM conversation (messages, size, mode, last turn). Clear a
   stuck turn lock, or reset the conversation.
 - **Usage**: per day, LLM tokens by model with an estimated cost at list prices (see

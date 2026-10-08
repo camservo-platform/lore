@@ -43,6 +43,12 @@ spec:
         # Restart when the shared config changes: envFrom is only read at startup.
         checksum/config: {{ include (print $.Template.BasePath "/config.yaml") $ | sha256sum }}
     spec:
+      {{- if $v.manageUsers }}
+      # Lets the admin page edit the password logins (the users Secret, and nothing else).
+      serviceAccountName: {{ include "lore.fullname" . }}-web
+      {{- else }}
+      automountServiceAccountToken: false
+      {{- end }}
       {{- include "lore.scheduling" $v | nindent 6 }}
       {{- with .Values.app.imagePullSecrets }}
       imagePullSecrets:
@@ -78,6 +84,10 @@ spec:
               value: "9100"
             - name: LORE_PASSWORDS_FILE
               value: /etc/lore/users/users
+            {{- if $v.manageUsers }}
+            - name: LORE_USERS_SECRET
+              value: {{ .Values.usersSecret }}
+            {{- end }}
             {{- range $env, $key := dict "GITHUB_CLIENT_ID" "github-client-id" "GITHUB_CLIENT_SECRET" "github-client-secret" }}
             - name: {{ $env }}
               valueFrom:

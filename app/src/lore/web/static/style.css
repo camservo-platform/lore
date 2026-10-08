@@ -270,6 +270,10 @@ table.grid td.null { color: var(--muted); font-style: italic; }
 .usage-totals div { border: 1px solid var(--line); border-radius: 8px; padding: 8px 12px; background: var(--bg); }
 .usage-totals dt { font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
 .usage-totals dd { margin: 0; font: 600 18px/1.3 var(--sans); font-variant-numeric: tabular-nums; }
+#add-user-form { margin-bottom: 10px; }
+.new-password { margin: 0 0 10px; padding: 10px 12px; border: 1px solid var(--accent); border-radius: 8px; background: var(--surface-2); }
+.new-password code { font-size: 15px; user-select: all; }
+.new-password button { margin-left: 8px; }
 table.grid td.num, table.grid th.num { text-align: right; font-variant-numeric: tabular-nums; }
 dialog { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); color: var(--ink); padding: 18px 20px; width: min(520px, calc(100% - 32px)); }
 dialog::backdrop { background: rgb(0 0 0 / 0.4); }

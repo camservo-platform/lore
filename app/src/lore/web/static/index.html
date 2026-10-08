@@ -123,6 +123,7 @@
         <button role="tab" data-tab="vector" aria-selected="false">Vector search</button>
         <button role="tab" data-tab="worlds" aria-selected="false">Worlds</button>
         <button role="tab" data-tab="players" aria-selected="false">Players</button>
+        <button role="tab" data-tab="users" aria-selected="false">Users</button>
         <button role="tab" data-tab="tables" aria-selected="false">Tables</button>
         <button role="tab" data-tab="usage" aria-selected="false">Usage</button>
       </div>
@@ -163,6 +164,20 @@
       <section class="panel" id="tab-players" hidden>
         <p class="hint">Who has Lore open right now, and when everyone else was last seen. Refreshes every 15 seconds.</p>
         <div class="grid-wrap"><table class="grid" id="players-table"></table></div>
+      </section>
+
+      <section class="panel" id="tab-users" hidden>
+        <p class="hint">Password logins. Leave the password empty to generate one; it's shown once, so pass it on
+          then. Changing a password or deleting a user signs out their password sessions. Admins and GitHub
+          sign-ins are set in the deployment's values (<code>web.admins</code>, <code>web.githubUsers</code>).</p>
+        <form id="add-user-form" class="row wrap">
+          <input id="new-user-name" placeholder="Username (lowercase, e.g. dana)" autocomplete="off" required>
+          <input id="new-user-password" type="password" placeholder="Password (optional: generated if empty)" autocomplete="new-password">
+          <button type="submit" class="primary">Add user</button>
+        </form>
+        <div class="new-password" id="new-password" hidden></div>
+        <p class="error" id="users-error" hidden></p>
+        <div class="grid-wrap"><table class="grid" id="users-table"></table></div>
       </section>
 
       <section class="panel" id="tab-tables" hidden>

@@ -1,0 +1,38 @@
+{{- if .Values.web.manageUsers }}
+{{- $ctx := dict "ctx" . "component" "web" }}
+# The web pod's identity: it may read and update the users Secret (password logins, from
+# the admin page's Users tab) and nothing else in the cluster.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "lore.fullname" . }}-web
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "lore.fullname" . }}-web-users
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [{{ .Values.usersSecret | quote }}]
+    verbs: [get, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "lore.fullname" . }}-web-users
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "lore.fullname" . }}-web-users
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "lore.fullname" . }}-web
+    namespace: {{ .Release.Namespace }}
+{{- end }}

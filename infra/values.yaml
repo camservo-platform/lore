@@ -147,6 +147,11 @@ web:
   # Lore names allowed into the admin view, which can run SQL against the game database
   # and search the lore vectors directly. Set in values.local.yaml.
   admins: []
+  # Let admins add and delete password logins and change passwords from the admin page
+  # (Users tab). This gives the web pod a service account that may get and patch the
+  # users Secret, and nothing else. Off: the tab is read-only and ./deploy.sh add-user
+  # is the only way.
+  manageUsers: true
   # GitHub sign-in: GitHub login -> Lore name, e.g. {octocat: alice}. Only listed
   # accounts may sign in. The OAuth app's client id and secret go in secrets.env
   # (GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET); its callback URL is

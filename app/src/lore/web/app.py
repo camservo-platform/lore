@@ -46,7 +46,7 @@ from lore.events import EventBus
 from lore import metrics
 from lore.usage import Health, Presence, Usage
 from lore.voice import Voice
-from lore.web import conversation
+from lore.web import conversation, users
 from lore.web.auth import COOKIE, Auth, AuthError, parse_user_map
 from lore.web.drain import Drain, Draining
 
@@ -82,6 +82,7 @@ class WebSettings:
     admins: frozenset[str]
     public_url: str
     passwords_file: str | None
+    users_secret: str | None
     github_client_id: str | None
     github_client_secret: str | None
     github_users: str
@@ -106,6 +107,7 @@ class WebSettings:
             dev_user=env.get("LORE_DEV_USER") or None,
             public_url=env.get("LORE_PUBLIC_URL", "http://localhost:8080"),
             passwords_file=env.get("LORE_PASSWORDS_FILE") or None,
+            users_secret=env.get("LORE_USERS_SECRET") or None,
             github_client_id=env.get("GITHUB_CLIENT_ID") or None,
             github_client_secret=env.get("GITHUB_CLIENT_SECRET") or None,
             github_users=env.get("LORE_GITHUB_USERS", ""),
@@ -314,6 +316,8 @@ def create_app(drain: Drain | None = None) -> Starlette:
         github_users=parse_user_map(settings.github_users), dev_user=settings.dev_user,
     )
 
+    user_store = users.user_store(settings.users_secret, settings.passwords_file)
+
     async def user_of(request: Request) -> str:
         user = await auth.user(request)
         if not user:
@@ -393,6 +397,78 @@ def create_app(drain: Drain | None = None) -> Starlette:
         revoked = await auth.revoke(request.path_params["session"])
         log.info("admin %s revoked session %s", admin_user, request.path_params["session"])
         return JSONResponse({"revoked": revoked})
+
+    # --- user admin: password logins (GitHub accounts and admins are set in values) ---
+
+    async def admin_users(request: Request) -> Response:
+        await require_admin(request)
+        try:
+            names = await user_store.names()
+            error = None
+        except Exception as e:
+            log.exception("couldn't read the user list")
+            names, error = [], str(e) if isinstance(e, users.UserError) else "Couldn't read the user list."
+        sessions: dict[str, int] = {}
+        for s in await auth.sessions():
+            sessions[s["user"]] = sessions.get(s["user"], 0) + 1
+        github = parse_user_map(settings.github_users)
+        everyone = sorted(set(names) | set(github.values()) | set(settings.admins) | set(sessions))
+        return JSONResponse({
+            "writable": user_store.writable and error is None, "error": error,
+            "users": [{
+                "name": name, "password": name in names, "admin": name in settings.admins,
+                "github": sorted(login for login, n in github.items() if n == name), "sessions": sessions.get(name, 0),
+            } for name in everyone],
+        })
+
+    def user_failed(e: users.UserError) -> Response:
+        return JSONResponse({"error": str(e)}, status_code=400)
+
+    async def admin_add_user(request: Request) -> Response:
+        admin_user = await require_admin(request)
+        body = await request.json()
+        password = body.get("password") or users.new_password()
+        try:
+            name = users.check_name(body.get("name", ""))
+            auth.passwords.use(await user_store.set_password(name, password, create=True))
+        except users.UserError as e:
+            return user_failed(e)
+        log.info("admin %s added user %s", admin_user, name)
+        return JSONResponse({"name": name, "password": None if body.get("password") else password})
+
+    async def admin_set_password(request: Request) -> Response:
+        admin_user = await require_admin(request)
+        name, body = request.path_params["name"], await request.json()
+        password = body.get("password") or users.new_password()
+        try:
+            auth.passwords.use(await user_store.set_password(name, password, create=False))
+        except users.UserError as e:
+            return user_failed(e)
+        # The old password may be why it's being changed: sign its sessions out.
+        signed_out = await auth.revoke_user(name, provider="password")
+        log.info("admin %s set a new password for %s (%d sessions signed out)", admin_user, name, signed_out)
+        return JSONResponse({"name": name, "password": None if body.get("password") else password,
+                             "signed_out": signed_out})
+
+    async def admin_delete_user(request: Request) -> Response:
+        admin_user = await require_admin(request)
+        name = request.path_params["name"]
+        if name == admin_user:
+            return user_failed(users.UserError("You can't delete your own login while signed in with it."))
+        try:
+            auth.passwords.use(await user_store.delete(name))
+        except users.UserError as e:
+            return user_failed(e)
+        signed_out = await auth.revoke_user(name, provider="password")
+        log.info("admin %s deleted user %s (%d sessions signed out)", admin_user, name, signed_out)
+        return JSONResponse({"deleted": name, "signed_out": signed_out})
+
+    async def admin_sign_out_user(request: Request) -> Response:
+        admin_user = await require_admin(request)
+        name = request.path_params["name"]
+        signed_out = await auth.revoke_user(name)
+        log.info("admin %s signed %s out everywhere (%d sessions)", admin_user, name, signed_out)
+        return JSONResponse({"signed_out": signed_out})
 
     async def healthz(_request: Request) -> Response:
         return JSONResponse({"status": "ok"})
@@ -998,6 +1074,11 @@ def create_app(drain: Drain | None = None) -> Starlette:
             Route("/auth/logout", logout, methods=["POST"]),
             Route("/api/admin/sessions", admin_sessions),
             Route("/api/admin/sessions/{session}/revoke", admin_revoke_session, methods=["POST"]),
+            Route("/api/admin/users", admin_users),
+            Route("/api/admin/users/add", admin_add_user, methods=["POST"]),
+            Route("/api/admin/users/{name}/password", admin_set_password, methods=["POST"]),
+            Route("/api/admin/users/{name}/delete", admin_delete_user, methods=["POST"]),
+            Route("/api/admin/users/{name}/sign-out", admin_sign_out_user, methods=["POST"]),
             Route("/api/me", me),
             Route("/api/campaigns", campaigns),
             Route("/api/worlds", forge_world, methods=["POST"]),

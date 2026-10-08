@@ -1047,12 +1047,14 @@ $("admin-link").addEventListener("click", () => {
 const TAB_LOADERS = {
   worlds: () => loadWorldsAdmin(),
   players: () => loadPlayers(),
+  users: () => loadUsers(),
   tables: () => loadTables(),
   usage: () => loadUsage(),
 };
 let playersTimer = null;
 
 function openTab(name) {
+  if (name !== "users") $("new-password").hidden = true;  // don't leave a password on screen
   document.querySelectorAll(".tabs button").forEach((t) => t.setAttribute("aria-selected", String(t.dataset.tab === name)));
   for (const t of document.querySelectorAll(".tabs button")) $(`tab-${t.dataset.tab}`).hidden = t.dataset.tab !== name;
   clearInterval(playersTimer);
@@ -1409,6 +1411,76 @@ async function loadPlayers() {
     table.innerHTML = `<tr><td class="null">${escapeHtml(e.message)}</td></tr>`;
   }
 }
+
+// Password logins: add, change passwords, delete, sign out everywhere.
+async function loadUsers() {
+  const table = $("users-table");
+  let data;
+  try { data = await (await api("/api/admin/users")).json(); } catch (e) { table.innerHTML = `<tr><td class="null">${escapeHtml(e.message)}</td></tr>`; return; }
+  $("users-error").hidden = !data.error;
+  $("users-error").textContent = data.error || "";
+  $("add-user-form").querySelectorAll("input, button").forEach((el) => { el.disabled = !data.writable; });
+  const can = data.writable;
+  table.innerHTML = "<thead><tr><th>User</th><th>Sign-in</th><th>Admin</th><th class=\"num\">Sessions</th><th></th></tr></thead><tbody>" +
+    (data.users.length ? data.users.map((u) => {
+      const ways = [u.password ? "password" : "", ...u.github.map((g) => `GitHub @${g}`)].filter(Boolean);
+      const me = u.name === state.user;
+      return `<tr>
+        <td>${escapeHtml(u.name)}${me ? " (you)" : ""}</td>
+        <td>${ways.length ? escapeHtml(ways.join(", ")) : '<span class="null">none (can\'t sign in)</span>'}</td>
+        <td>${u.admin ? "admin" : ""}</td>
+        <td class="num">${u.sessions}</td>
+        <td>${u.password && can ? `<button class="small-button" data-password="${escapeHtml(u.name)}">New password</button>` : ""}
+            ${u.sessions && !me ? `<button class="small-button" data-signout="${escapeHtml(u.name)}">Sign out everywhere</button>` : ""}
+            ${u.password && can && !me ? `<button class="small-button danger" data-delete="${escapeHtml(u.name)}">Delete</button>` : ""}</td></tr>`;
+    }).join("") : '<tr><td colspan="5" class="null">No users yet.</td></tr>') + "</tbody>";
+  table.querySelectorAll("[data-password]").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.dataset.password;
+    const typed = prompt(`New password for ${name}. Leave empty to generate one (shown once).\n\nTheir password sessions will be signed out.`, "");
+    if (typed === null) return;
+    try {
+      const result = await adminPost(`/api/admin/users/${encodeURIComponent(name)}/password`, { password: typed });
+      showNewPassword(name, result.password, "has a new password");
+    } catch (e) { toast(e.message); }
+    loadUsers();
+  }));
+  table.querySelectorAll("[data-signout]").forEach((b) => b.addEventListener("click", async () => {
+    if (!confirm(`Sign ${b.dataset.signout} out on every device?`)) return;
+    await adminPost(`/api/admin/users/${encodeURIComponent(b.dataset.signout)}/sign-out`, {}).catch((e) => toast(e.message));
+    loadUsers();
+  }));
+  table.querySelectorAll("[data-delete]").forEach((b) => b.addEventListener("click", async () => {
+    const name = b.dataset.delete;
+    if (!confirm(`Delete the login “${name}”? They're signed out and can't sign in with a password again. Their characters stay in their worlds.`)) return;
+    try {
+      await adminPost(`/api/admin/users/${encodeURIComponent(name)}/delete`, {});
+      toast(`Deleted ${name}.`);
+    } catch (e) { toast(e.message); }
+    loadUsers();
+  }));
+}
+
+// A generated password is shown once, here, until the tab is reloaded or another is made.
+function showNewPassword(name, password, what) {
+  const box = $("new-password");
+  if (!password) { box.hidden = true; toast(`${name} ${what}.`); return; }
+  box.innerHTML = `${escapeHtml(name)} ${escapeHtml(what)}: <code>${escapeHtml(password)}</code>
+    <button type="button" class="small-button" id="copy-password">Copy</button>
+    <span class="hint">It won't be shown again.</span>`;
+  box.hidden = false;
+  $("copy-password").addEventListener("click", () => navigator.clipboard.writeText(password).then(() => toast("Copied."), () => toast("Couldn't copy; select it instead.")));
+}
+
+$("add-user-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const name = $("new-user-name").value.trim().toLowerCase();
+  try {
+    const result = await adminPost("/api/admin/users/add", { name, password: $("new-user-password").value });
+    e.target.reset();
+    showNewPassword(result.name, result.password, "was added");
+  } catch (err) { toast(err.message); }
+  loadUsers();
+});
 
 async function loadTables() {
   const table = $("tables-table");

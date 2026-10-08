@@ -58,18 +58,28 @@ class Passwords:
         self._entries: dict[str, bytes] = {}
 
     def _load(self) -> None:
-        if not self._path or not self._path.exists():
-            self._entries = {}
+        # Only when the file changes (or goes away), so entries from use() hold until then.
+        if not self._path:
             return
-        mtime = self._path.stat().st_mtime
+        mtime = self._path.stat().st_mtime if self._path.exists() else None
         if mtime != self._mtime:
-            entries = {}
-            for line in self._path.read_text().splitlines():
-                name, _, digest = line.strip().partition(":")
-                if name and digest.startswith(("$2y$", "$2b$", "$2a$")):
-                    # htpasswd writes $2y$; bcrypt verifies it as the equivalent $2b$.
-                    entries[name] = ("$2b$" + digest[4:]).encode()
-            self._entries, self._mtime = entries, mtime
+            self._entries = {}
+            if mtime is not None:
+                self._parse(self._path.read_text())
+            self._mtime = mtime
+
+    def use(self, text: str) -> None:
+        """Takes freshly written htpasswd text at once (the mounted Secret file only
+        catches up after a minute or so; the next change to it is reloaded as usual)."""
+        self._entries = {}
+        self._parse(text)
+
+    def _parse(self, text: str) -> None:
+        for line in text.splitlines():
+            name, _, digest = line.strip().partition(":")
+            if name and digest.startswith(("$2y$", "$2b$", "$2a$")):
+                # htpasswd writes $2y$; bcrypt verifies it as the equivalent $2b$.
+                self._entries[name] = ("$2b$" + digest[4:]).encode()
 
     def check(self, username: str, password: str) -> bool:
         self._load()
@@ -149,6 +159,17 @@ class Auth:
                 out.append({"id": handle(key.split(":", 2)[2]), "user": info["user"], "provider": info["provider"],
                             "created": info["created"], "agent": info.get("agent", "")})
         return sorted(out, key=lambda s: -s["created"])
+
+    async def revoke_user(self, user: str, provider: str | None = None) -> int:
+        """Signs a user out everywhere (only their sessions from `provider`, if given)."""
+        revoked = 0
+        async for key in self._redis.scan_iter("lore:session:*"):
+            raw = await self._redis.get(key)
+            if raw:
+                info = json.loads(raw)
+                if info["user"] == user and provider in (None, info["provider"]):
+                    revoked += await self._redis.delete(key)
+        return revoked
 
     async def revoke(self, session_handle: str) -> bool:
         async for key in self._redis.scan_iter("lore:session:*"):
