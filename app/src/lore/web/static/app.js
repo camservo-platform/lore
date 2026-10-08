@@ -955,34 +955,106 @@ $("sql-form").addEventListener("submit", async (e) => {
   }
 });
 
-$("vector-form").addEventListener("submit", async (e) => {
+// Search lore by meaning, or (empty query, one world chosen) browse it; edit, merge or
+// delete entries from the results.
+$("vector-form").addEventListener("submit", (e) => {
   e.preventDefault();
+  loadLoreResults();
+});
+
+async function loadLoreResults() {
   const out = $("vector-result");
-  out.innerHTML = '<li class="meta">Searching…</li>';
+  const query = $("vector-query").value.trim();
+  const campaignId = $("vector-campaign").value;
+  if (!query && !campaignId) {
+    out.innerHTML = '<li class="meta">Type something to search for, or pick a world to browse all of its lore.</li>';
+    return;
+  }
+  out.innerHTML = `<li class="meta">${query ? "Searching…" : "Loading…"}</li>`;
   try {
-    const hits = await (await api("/api/admin/vector", {
-      method: "POST",
-      body: JSON.stringify({
-        query: $("vector-query").value, campaign_id: $("vector-campaign").value,
-        kind: $("vector-kind").value, limit: $("vector-limit").value,
-      }),
-    })).json();
+    const hits = query
+      ? await (await api("/api/admin/vector", {
+          method: "POST",
+          body: JSON.stringify({ query, campaign_id: campaignId, kind: $("vector-kind").value, limit: $("vector-limit").value }),
+        })).json()
+      : await (await api(`/api/admin/lore?${new URLSearchParams({ campaign_id: campaignId, kind: $("vector-kind").value })}`)).json();
     out.innerHTML = hits.length ? "" : '<li class="meta">No lore matches those filters.</li>';
     for (const h of hits) {
       const li = document.createElement("li");
-      const pct = Math.max(0, Math.min(100, h.similarity * 100));
+      const score = h.similarity === undefined ? "" : `<span class="score">${h.similarity.toFixed(3)}</span>`;
+      const bar = h.similarity === undefined ? "" :
+        `<div class="bar"><div style="width:${Math.max(0, Math.min(100, h.similarity * 100))}%"></div></div>`;
       li.innerHTML = `
         <div class="head"><span class="title">${escapeHtml(h.title)}</span>
           <span class="meta">${escapeHtml(h.kind)} · ${escapeHtml(h.campaign)}${h.tags.length ? " · " + escapeHtml(h.tags.join(", ")) : ""}</span>
-          <span class="score">${h.similarity.toFixed(3)}</span></div>
-        <div class="bar"><div style="width:${pct}%"></div></div>
-        <p>${escapeHtml(h.content)}</p>`;
+          ${score}</div>
+        ${bar}
+        <p>${escapeHtml(h.content)}</p>
+        <div class="lore-actions">
+          <button class="small-button" data-act="edit">Edit</button>
+          <button class="small-button" data-act="merge">Merge into…</button>
+          <button class="small-button danger" data-act="delete">Delete</button>
+        </div>`;
+      li.querySelector('[data-act="edit"]').addEventListener("click", () => editLore(h));
+      li.querySelector('[data-act="merge"]').addEventListener("click", () => mergeLore(h));
+      li.querySelector('[data-act="delete"]').addEventListener("click", async () => {
+        if (!confirm(`Delete the ${h.kind} “${h.title}”? The Game Master will no longer know it.`)) return;
+        try { await adminPost(`/api/admin/lore/${h.id}/delete`, {}); toast("Lore deleted."); loadLoreResults(); }
+        catch (err) { toast(err.message); }
+      });
       out.append(li);
     }
   } catch (err) {
     out.innerHTML = `<li class="meta">${escapeHtml(err.message)}</li>`;
   }
-});
+}
+
+function editLore(entry) {
+  const form = $("lore-form");
+  $("lore-context").textContent = `${entry.campaign} · saving re-embeds the entry for search`;
+  $("lore-error").hidden = true;
+  form.kind.value = entry.kind;
+  form.title.value = entry.title;
+  form.tags.value = entry.tags.join(", ");
+  form.content.value = entry.content;
+  const dialog = $("lore-dialog");
+  form.onsubmit = async (e) => {
+    if (e.submitter?.value !== "save") return;
+    e.preventDefault();
+    try {
+      await adminPost(`/api/admin/lore/${entry.id}`, {
+        kind: form.kind.value, title: form.title.value, tags: form.tags.value, content: form.content.value,
+      });
+      dialog.close();
+      toast("Lore saved.");
+      loadLoreResults();
+    } catch (err) {
+      $("lore-error").textContent = err.message;
+      $("lore-error").hidden = false;
+    }
+  };
+  dialog.showModal();
+}
+
+async function mergeLore(entry) {
+  const others = (await (await api(`/api/admin/lore?campaign_id=${entry.campaign_id}`)).json()).filter((o) => o.id !== entry.id);
+  if (!others.length) { toast("There's nothing else in this world to merge into."); return; }
+  const select = $("merge-target");
+  select.innerHTML = others.map((o) => `<option value="${o.id}">${escapeHtml(o.kind)}: ${escapeHtml(o.title)}</option>`).join("");
+  $("merge-context").textContent = `“${entry.title}” is appended to the entry you pick, its tags are combined, and “${entry.title}” is removed.`;
+  const dialog = $("merge-dialog");
+  $("merge-form").onsubmit = async (e) => {
+    if (e.submitter?.value !== "merge") return;
+    e.preventDefault();
+    try {
+      await adminPost(`/api/admin/lore/${entry.id}/merge`, { into: Number(select.value) });
+      dialog.close();
+      toast("Lore merged.");
+      loadLoreResults();
+    } catch (err) { toast(err.message); }
+  };
+  dialog.showModal();
+}
 
 // Admin: worlds and characters ----------------------------------------------------------
 

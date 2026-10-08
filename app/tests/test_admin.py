@@ -129,3 +129,39 @@ async def test_worlds_lists_characters_and_counts(app_state, game_tools, campaig
     [world] = [w for w in await worlds(app_state.pool) if w["name"] == campaign]
     assert world["events"] >= 2 and world["lore"] == 0
     assert [(c["name"], c["player"], c["hp"]) for c in world["characters"]] == [("Wren", "alice", 12)]
+
+
+# --- lore editing ---------------------------------------------------------------------
+
+from lore.admin import delete_lore, list_lore, merge_lore, update_lore
+
+
+async def test_edit_merge_and_delete_lore(app_state, lore_tools, campaign):
+    await lore_tools("add_lore", campaign=campaign, kind="npc", title="Marta", content="A dwarf innkeeper.", tags=["inn"])
+    await lore_tools("add_lore", campaign=campaign, kind="rumor", title="Marta's secret", content="She hides a key.",
+                     tags=["secret"])
+    cid = await app_state.pool.fetchval("SELECT id FROM campaigns WHERE name = $1", campaign)
+    entries = {e["title"]: e for e in await list_lore(app_state.pool, cid)}
+
+    event = await update_lore(app_state.pool, app_state.embedder, entries["Marta"]["id"],
+                              {"content": "A dwarf innkeeper who runs the Gilded Flagon.", "tags": "Inn, docks"}, "dana")
+    assert event["type"] == "lore_edited"
+    [marta] = await lore_tools("get_lore", campaign=campaign, title="Marta")
+    assert marta["content"].endswith("Gilded Flagon.") and marta["tags"] == ["docks", "inn"]
+    # Re-embedded: a search for the new words finds it.
+    assert (await lore_tools("search_lore", campaign=campaign, query="gilded flagon"))[0]["title"] == "Marta"
+
+    with pytest.raises(AdminError, match="Kind must be"):
+        await update_lore(app_state.pool, app_state.embedder, entries["Marta"]["id"], {"kind": "spell"}, "dana")
+
+    event = await merge_lore(app_state.pool, app_state.embedder, entries["Marta's secret"]["id"],
+                             entries["Marta"]["id"], "dana")
+    assert event["summary"] == "An admin merged lore 'Marta's secret' into 'Marta'"
+    [marta] = await lore_tools("get_lore", campaign=campaign, title="Marta")
+    assert marta["content"].endswith("She hides a key.") and marta["tags"] == ["docks", "inn", "secret"]
+    assert [e["title"] for e in await list_lore(app_state.pool, cid)] == ["Marta"]
+
+    await delete_lore(app_state.pool, entries["Marta"]["id"], "dana")
+    assert await list_lore(app_state.pool, cid) == []
+    with pytest.raises(AdminError, match="no longer exists"):
+        await delete_lore(app_state.pool, entries["Marta"]["id"], "dana")

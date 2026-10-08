@@ -134,7 +134,7 @@
 
       <section class="panel" id="tab-vector" hidden>
         <form id="vector-form" class="row wrap">
-          <input id="vector-query" placeholder="Search lore by meaning, e.g. who controls the river crossings?">
+          <input id="vector-query" placeholder="Search lore by meaning, or leave empty and pick a world to browse">
           <select id="vector-campaign"><option value="">All campaigns</option></select>
           <select id="vector-kind">
             <option value="">Any kind</option>
@@ -204,6 +204,41 @@
       <div class="row end">
         <button value="cancel" formnovalidate>Cancel</button>
         <button value="save" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="lore-dialog">
+    <form method="dialog" id="lore-form">
+      <h3>Edit lore</h3>
+      <p class="hint" id="lore-context"></p>
+      <div class="fields">
+        <label>Kind
+          <select name="kind">
+            <option>location</option><option>npc</option><option>faction</option><option>item</option>
+            <option>history</option><option>storyline</option><option>rumor</option><option>other</option>
+          </select>
+        </label>
+        <label>Title <input name="title" required></label>
+        <label class="wide">Tags <input name="tags" placeholder="comma, separated"></label>
+        <label class="wide">Content <textarea name="content" rows="8" required></textarea></label>
+      </div>
+      <p class="error" id="lore-error" hidden></p>
+      <div class="row end">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button value="save" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="merge-dialog">
+    <form method="dialog" id="merge-form">
+      <h3>Merge lore</h3>
+      <p class="hint" id="merge-context"></p>
+      <label>Merge into <select id="merge-target"></select></label>
+      <div class="row end">
+        <button value="cancel" formnovalidate>Cancel</button>
+        <button value="merge" class="primary">Merge</button>
       </div>
     </form>
   </dialog>

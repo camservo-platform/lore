@@ -85,7 +85,7 @@ async def vector_search(
     embedding = await embedder.embed_query(query)
     rows = await pool.fetch(
         """
-        SELECT l.id, c.name AS campaign, l.kind, l.title, l.content, l.tags, l.updated_at,
+        SELECT l.id, l.campaign_id, c.name AS campaign, l.kind, l.title, l.content, l.tags, l.updated_at,
                1 - (l.embedding <=> $1) AS similarity
         FROM lore_entries l JOIN campaigns c ON c.id = l.campaign_id
         WHERE ($2::bigint IS NULL OR l.campaign_id = $2) AND ($3::text IS NULL OR l.kind = $3)
@@ -256,3 +256,96 @@ async def update_character(
 
 def _short(value: Any) -> str:
     return "none" if value in (None, "") else str(value)
+
+
+# --- lore editing ---------------------------------------------------------------------
+
+LORE_KINDS = ("location", "npc", "faction", "item", "history", "storyline", "rumor", "other")
+
+
+async def list_lore(pool: asyncpg.Pool, campaign_id: int, kind: str | None = None) -> list[dict[str, Any]]:
+    rows = await pool.fetch(
+        """
+        SELECT l.id, l.campaign_id, c.name AS campaign, l.kind, l.title, l.content, l.tags, l.updated_at
+        FROM lore_entries l JOIN campaigns c ON c.id = l.campaign_id
+        WHERE l.campaign_id = $1 AND ($2::text IS NULL OR l.kind = $2) ORDER BY l.kind, lower(l.title)
+        """,
+        campaign_id, kind,
+    )
+    return [{k: _json_value(v) for k, v in dict(r).items()} for r in rows]
+
+
+def _clean_tags(tags: Any) -> list[str]:
+    if isinstance(tags, str):
+        tags = tags.split(",")
+    return sorted({t.strip().lower() for t in tags or [] if t.strip()})
+
+
+async def update_lore(pool: asyncpg.Pool, embedder: Embedder, lore_id: int, changes: dict[str, Any],
+                      actor: str) -> dict[str, Any]:
+    """Edits a lore entry (kind, title, content, tags) and re-embeds it. Returns the event."""
+    current = await pool.fetchrow("SELECT * FROM lore_entries WHERE id = $1", lore_id)
+    if current is None:
+        raise AdminError("That lore entry no longer exists.")
+    kind = (changes.get("kind") or current["kind"]).strip().lower()
+    title = (changes.get("title") or current["title"]).strip()
+    content = (changes.get("content") if changes.get("content") is not None else current["content"]).strip()
+    tags = _clean_tags(changes["tags"]) if "tags" in changes else list(current["tags"])
+    if kind not in LORE_KINDS:
+        raise AdminError(f"Kind must be one of {', '.join(LORE_KINDS)}.")
+    if not title or not content:
+        raise AdminError("Title and content can't be empty.")
+    embedding = await embedder.embed_document(f"{title}\n\n{content}")
+    async with pool.acquire() as conn, conn.transaction():
+        try:
+            await conn.execute(
+                "UPDATE lore_entries SET kind = $2, title = $3, content = $4, tags = $5, embedding = $6,"
+                " updated_at = now() WHERE id = $1",
+                lore_id, kind, title, content, tags, embedding,
+            )
+        except asyncpg.UniqueViolationError:
+            raise AdminError(f"There's already a {kind} titled {title!r} in this world.") from None
+        return await events.record(
+            conn, campaign_id=current["campaign_id"], actor=actor, type="lore_edited",
+            summary=f"An admin edited lore: {kind} '{title}'", data={"id": lore_id, "kind": kind, "title": title},
+        )
+
+
+async def delete_lore(pool: asyncpg.Pool, lore_id: int, actor: str) -> dict[str, Any]:
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow("DELETE FROM lore_entries WHERE id = $1 RETURNING campaign_id, kind, title", lore_id)
+        if row is None:
+            raise AdminError("That lore entry no longer exists.")
+        return await events.record(
+            conn, campaign_id=row["campaign_id"], actor=actor, type="lore_deleted",
+            summary=f"An admin deleted lore: {row['kind']} '{row['title']}'",
+            data={"kind": row["kind"], "title": row["title"]},
+        )
+
+
+async def merge_lore(pool: asyncpg.Pool, embedder: Embedder, source_id: int, target_id: int,
+                     actor: str) -> dict[str, Any]:
+    """Folds `source` into `target` (same world): appends its content, combines tags,
+    re-embeds the target and deletes the source. Returns the event."""
+    if source_id == target_id:
+        raise AdminError("Pick a different entry to merge into.")
+    source = await pool.fetchrow("SELECT * FROM lore_entries WHERE id = $1", source_id)
+    target = await pool.fetchrow("SELECT * FROM lore_entries WHERE id = $1", target_id)
+    if source is None or target is None:
+        raise AdminError("That lore entry no longer exists.")
+    if source["campaign_id"] != target["campaign_id"]:
+        raise AdminError("Lore can only be merged within one world.")
+    content = f"{target['content'].rstrip()}\n\n{source['content'].strip()}"
+    tags = _clean_tags(list(target["tags"]) + list(source["tags"]))
+    embedding = await embedder.embed_document(f"{target['title']}\n\n{content}")
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "UPDATE lore_entries SET content = $2, tags = $3, embedding = $4, updated_at = now() WHERE id = $1",
+            target_id, content, tags, embedding,
+        )
+        await conn.execute("DELETE FROM lore_entries WHERE id = $1", source_id)
+        return await events.record(
+            conn, campaign_id=target["campaign_id"], actor=actor, type="lore_merged",
+            summary=f"An admin merged lore '{source['title']}' into '{target['title']}'",
+            data={"from": source["title"], "into": target["title"]},
+        )

@@ -719,6 +719,31 @@ def create_app() -> Starlette:
         assigned = await redis.hgetall(npc_voices_key(campaign_id))
         return JSONResponse([{"name": n, "voice": v} for n, v in sorted(assigned.items())])
 
+    async def admin_lore(request: Request) -> Response:
+        await require_admin(request)
+        pool, _ = await admin_backend()
+        return JSONResponse(await admin.list_lore(
+            pool, int(request.query_params["campaign_id"]), request.query_params.get("kind") or None))
+
+    async def admin_lore_change(request: Request) -> Response:
+        """Edit (POST /lore/{id}), delete (/delete) or merge (/merge, {"into": id}) a lore entry."""
+        user = await require_admin(request)
+        pool, embedder = await admin_backend()
+        lore_id, action = int(request.path_params["lore_id"]), request.path_params.get("action", "edit")
+        body = await request.json() if action != "delete" else {}
+        try:
+            if action == "delete":
+                event = await admin.delete_lore(pool, lore_id, user)
+            elif action == "merge":
+                event = await admin.merge_lore(pool, embedder, lore_id, int(body["into"]), user)
+            else:
+                event = await admin.update_lore(pool, embedder, lore_id, body, user)
+        except admin.AdminError as e:
+            return admin_failed(e)
+        await bus.publish(event)
+        log.info("admin %s: %s", user, event["summary"])
+        return JSONResponse(event)
+
     async def admin_presence(request: Request) -> Response:
         await presence.seen(await require_admin(request), "admin")
         pool, _ = await admin_backend()
@@ -841,6 +866,9 @@ def create_app() -> Starlette:
             Route("/api/admin/worlds/{campaign_id:int}/delete", admin_delete_world, methods=["POST"]),
             Route("/api/admin/characters/{character_id:int}", admin_edit_character, methods=["POST"]),
             Route("/api/admin/presence", admin_presence),
+            Route("/api/admin/lore", admin_lore),
+            Route("/api/admin/lore/{lore_id:int}", admin_lore_change, methods=["POST"]),
+            Route("/api/admin/lore/{lore_id:int}/{action:str}", admin_lore_change, methods=["POST"]),
             Route("/api/admin/worlds/{campaign_id:int}/npc-voices", admin_npc_voices, methods=["GET", "POST"]),
             Route("/api/admin/tables", admin_tables),
             Route("/api/admin/tables/{campaign_id:int}/unlock", admin_unlock_table, methods=["POST"]),

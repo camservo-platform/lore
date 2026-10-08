@@ -308,6 +308,9 @@ body.login { align-items: center; justify-content: center; min-height: 100%; pad
 @keyframes tumble { 0% { transform: rotate(-200deg) scale(0.3); opacity: 0; } 100% { transform: none; opacity: 1; } }
 
 .npc-line { font-style: italic; }
+.lore-actions { display: flex; gap: 6px; margin-top: 6px; }
+dialog .fields .wide { grid-column: 1 / -1; }
+#merge-dialog label { display: grid; gap: 4px; margin: 10px 0; }
 .npc-voices { display: grid; gap: 6px; }
 .npc-voices select { width: 100%; padding: 4px 6px; font-size: 12px; }
 .npc-name {
