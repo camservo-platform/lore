@@ -308,6 +308,10 @@ body.login { align-items: center; justify-content: center; min-height: 100%; pad
 @keyframes tumble { 0% { transform: rotate(-200deg) scale(0.3); opacity: 0; } 100% { transform: none; opacity: 1; } }
 
 .npc-line { font-style: italic; }
+.health { border-radius: 10px; padding: 10px 14px; font-size: 14px; border: 1px solid; }
+.health.bad { background: color-mix(in srgb, var(--bad) 14%, var(--surface)); border-color: var(--bad); }
+.health.warn { background: color-mix(in srgb, #fab219 14%, var(--surface)); border-color: #c98500; }
+.health .hint { margin: 4px 0 0; display: inline-block; }
 .lore-actions { display: flex; gap: 6px; margin-top: 6px; }
 dialog .fields .wide { grid-column: 1 / -1; }
 #merge-dialog label { display: grid; gap: 4px; margin: 10px 0; }

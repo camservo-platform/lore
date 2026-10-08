@@ -92,7 +92,7 @@ async def generate(
 
 async def forge(
     client: anthropic.AsyncAnthropic, model: str, toolbox: Toolbox, user: str, theme: str, name: str | None,
-    on_usage=None,
+    on_usage=None, on_error=None,
 ) -> AsyncIterator[dict[str, Any]]:
     """Yields progress events; the last is {"type": "done", "campaign": {...}} or {"type": "error"}."""
     try:
@@ -116,12 +116,16 @@ async def forge(
         yield {"type": "error", "text": str(e)}
     except anthropic.APIError as e:
         log.exception("world generation failed")
+        if on_error:
+            await on_error(e)
         yield {"type": "error", "text": f"The LLM request failed: {e.message}"}
     except Exception as e:
         log.exception("world generation failed")
         while isinstance(e, BaseExceptionGroup) and e.exceptions:
             e = e.exceptions[0]
         if isinstance(e, anthropic.APIStatusError):
+            if on_error:
+                await on_error(e)
             yield {"type": "error", "text": f"The LLM request failed: {e.message}"}
         else:
             yield {"type": "error", "text": f"World generation failed: {e}"}

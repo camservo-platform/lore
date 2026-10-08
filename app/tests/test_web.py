@@ -124,3 +124,34 @@ def test_npc_voice_pick_matches_gender_avoids_narrator_and_is_stable():
     assert marta in {"aura-2-cora-en", "aura-2-luna-en"}                                      # never the narrator
     # Everyone taken: reuse rather than fail.
     assert voice.pick_npc_voice(voices, "x", "masculine", {"aura-2-zeus-en", "aura-2-orion-en"}, avoid)
+
+
+def test_classify_model_errors():
+    import anthropic, httpx2
+    from lore.metrics import classify
+    def status(code, message):
+        response = httpx2.Response(code, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages"))
+        return anthropic.APIStatusError(message, response=response, body=None)
+    credit = status(400, "Your credit balance is too low to access the Anthropic API.")
+    assert classify(ExceptionGroup("tg", [credit])) == "billing"
+    assert classify(status(401, "invalid x-api-key")) == "auth"
+    assert classify(status(429, "rate limited")) == "rate_limit"
+    assert classify(status(529, "overloaded")) == "overloaded"
+    assert classify(status(500, "boom")) == "server"
+    assert classify(anthropic.APIConnectionError(request=httpx2.Request("POST", "https://x"))) == "connection"
+    assert classify(ValueError("x")) == "other"
+
+
+async def test_health_summarises_recent_errors(redis):
+    import time
+    from lore.usage import HEALTH_KEY, Health
+    await redis.delete(HEALTH_KEY)
+    health = Health(redis)
+    assert (await health.summary())["last"] is None
+    await health.error("billing", "credit balance too low")
+    await health.error("billing", "credit balance too low")
+    await redis.zadd(HEALTH_KEY, {'{"kind": "server", "message": "old", "at": %d}' % (time.time() - 7200): time.time() - 7200})
+    summary = await health.summary()
+    assert summary["last_hour"] == {"billing": 2}
+    assert summary["last_day"] == {"billing": 2, "server": 1}
+    assert summary["last"]["kind"] == "billing"

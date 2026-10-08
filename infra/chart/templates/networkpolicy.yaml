@@ -41,4 +41,13 @@ spec:
             matchLabels:
               {{- toYaml .podLabels | nindent 14 }}
         {{- end }}
+    {{- if .Values.monitoring.enabled }}
+    # Prometheus, for the metrics port only.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.monitoring.namespace }}
+      ports:
+        - port: 9100
+    {{- end }}
 {{- end }}

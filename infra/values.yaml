@@ -170,6 +170,14 @@ ingress:
   annotations: {}
   tlsSecretName: lore-tls
 
+# Prometheus metrics (web app, port 9100), alert rules and a Grafana dashboard. Needs the
+# Prometheus Operator CRDs (kube-prometheus-stack) and Grafana's dashboard sidecar.
+monitoring:
+  enabled: true
+  namespace: monitoring   # where Prometheus runs (allowed to scrape port 9100)
+  interval: 30s
+  grafanaDashboard: true
+
 # Restrict the data services to clients in this namespace, and the MCP servers to
 # this namespace plus the ingress controller (kubectl port-forward still works).
 # Same for the web UI.

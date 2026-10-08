@@ -13,6 +13,9 @@ spec:
     - name: http
       port: 8000
       targetPort: http
+    - name: metrics
+      port: 9100
+      targetPort: metrics
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -57,6 +60,8 @@ spec:
             # Only the ingress controller (and this namespace) can reach the pod.
             - name: FORWARDED_ALLOW_IPS
               value: "*"
+            - name: LORE_METRICS_PORT
+              value: "9100"
             - name: LORE_PASSWORDS_FILE
               value: /etc/lore/users/users
             {{- range $env, $key := dict "GITHUB_CLIENT_ID" "github-client-id" "GITHUB_CLIENT_SECRET" "github-client-secret" }}
@@ -77,6 +82,8 @@ spec:
           ports:
             - name: http
               containerPort: 8000
+            - name: metrics
+              containerPort: 9100
           readinessProbe:
             httpGet:
               path: /healthz

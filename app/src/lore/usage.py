@@ -9,6 +9,8 @@ and whether they have a voice conversation open.
 """
 
 import datetime
+import json
+import os
 import time
 from typing import Any
 
@@ -105,6 +107,37 @@ class Usage:
             out.append(day)
         unpriced = sorted(m for m in totals["models"] if m not in PRICES)
         return {"days": out, "totals": totals, "unpriced_models": unpriced}
+
+
+HEALTH_KEY = "lore:health:errors"
+HEALTH_WINDOW = 24 * 3600
+
+
+class Health:
+    """Recent model errors, for the admin view's health banner."""
+
+    def __init__(self, redis: Redis):
+        self._redis = redis
+
+    async def error(self, kind: str, message: str) -> None:
+        now = time.time()
+        entry = json.dumps({"kind": kind, "message": message[:300], "at": now, "nonce": os.urandom(4).hex()})
+        async with self._redis.pipeline() as pipe:
+            pipe.zadd(HEALTH_KEY, {entry: now})
+            pipe.zremrangebyscore(HEALTH_KEY, 0, now - HEALTH_WINDOW)
+            await pipe.execute()
+
+    async def summary(self) -> dict[str, Any]:
+        now = time.time()
+        recent = [json.loads(e) for e in await self._redis.zrangebyscore(HEALTH_KEY, now - HEALTH_WINDOW, now)]
+        hour, day = {}, {}
+        for e in recent:
+            day[e["kind"]] = day.get(e["kind"], 0) + 1
+            if e["at"] > now - 3600:
+                hour[e["kind"]] = hour.get(e["kind"], 0) + 1
+        last = recent[-1] if recent else None
+        return {"last_hour": hour, "last_day": day,
+                "last": {k: last[k] for k in ("kind", "message", "at")} if last else None}
 
 
 class Presence:

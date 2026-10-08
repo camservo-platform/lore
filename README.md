@@ -88,13 +88,33 @@ Images are multi-arch (amd64/arm64) and sized for small nodes (e.g. Raspberry Pi
 Network policies admit only pods in the `lore` namespace to the data services; the
 MCP servers additionally accept the ingress controller.
 
-## Authentication
+## Signing in
 
-The ingress puts Traefik basic auth in front of everything: the web UI at
-`https://<host>/` and the MCP servers at `/mcp/game` and `/mcp/lore`. Logins live in the `lore-users` secret (bcrypt htpasswd), managed with
-`./deploy.sh add-user | remove-user | users`. Traefik passes the authenticated name
-to the servers as `X-Lore-User` (overwriting anything the client sent), and every
-event records it as `actor`. In-cluster callers skip the ingress and are recorded as `gm`.
+The web app signs players in itself (`lore/web/auth.py`); both methods end in a session
+cookie, sessions live in Redis, and admins can list and revoke them (Admin > Players).
+
+- **GitHub.** Create an OAuth App (GitHub > Settings > Developer settings > OAuth Apps,
+  or the org's settings) with homepage `https://<host>` and callback URL
+  `https://<host>/auth/github/callback`. Put its `GITHUB_CLIENT_ID` and
+  `GITHUB_CLIENT_SECRET` in `infra/secrets.env`, map allowed GitHub logins to Lore
+  names in `values.local.yaml`, and redeploy:
+  ```yaml
+  web:
+    githubUsers:
+      octocat: alice      # GitHub login -> Lore name
+  ```
+  Unlisted GitHub accounts are refused.
+- **Passwords.** The logins in the `lore-users` secret (bcrypt htpasswd), managed with
+  `./deploy.sh add-user | remove-user | users`. Choose "Sign in with a password" and the
+  browser asks for them; scripts can send Basic credentials on every request.
+
+Players sign out by clicking their name. The web route has no proxy auth, and the app
+ignores any client-sent `X-Lore-User` (outside local dev).
+
+The MCP servers keep Traefik basic auth on their own ingress, with the same password
+logins: Traefik passes the authenticated name as `X-Lore-User` (overwriting anything the
+client sent) and every event records it as `actor`. In-cluster callers skip the ingress;
+the web app passes the signed-in player's name, and anything else is recorded as `gm`.
 
 Connect an MCP client such as Claude Code:
 
@@ -143,6 +163,17 @@ Open `https://<host>/` and sign in.
 - **New conversation** clears the GM's conversation memory for that campaign (the world,
   characters and chronicle stay); the GM then recaps from the chronicle and lore.
 
+- **Dice**: the sidebar's dice tray rolls for you (quick dice or notation like `2d6+3`,
+  for one of your characters); every roll at the table, the GM's included, appears in the
+  story as a card and goes in the chronicle under the roller's name.
+- **Character sheets**: the Party panel shows each character's stats, conditions and
+  inventory, yours first and expanded.
+- **Voices**: pick the GM's voice in speech mode. Non-player characters' speech is
+  tagged by the GM (`<say who="..." voice="feminine|masculine">`) and read in a voice of
+  their own, assigned once per world (admins can change it under Worlds > NPC voices).
+- **Session recaps**: when the GM ends a session, its "previously on..." recap is saved
+  as a `history` lore entry, and a new conversation starts from the latest recap.
+
 One conversation per campaign is shared by the whole table and kept in Redis; a Redis
 lock makes players take turns (a second player gets "the GM is answering another
 player"). The conversation is append-only, as Claude requires, and server-side
@@ -182,6 +213,27 @@ an **Admin** button with:
 Non-admins get 403 from the admin API. The web pod connects to Postgres directly for
 this, as the app's database user, and every admin action is logged with the admin's
 name (`./deploy.sh logs web`).
+
+- **Lore** (in Vector search): leave the query empty and pick a world to browse its lore;
+  edit entries (re-embedded for search), merge one into another, or delete them.
+- **Health banner**: model request failures in the last 24 h by kind (billing, auth,
+  rate limits, ...) with the latest message; admins also get a toast on sign-in if
+  anything failed in the last hour.
+
+## Monitoring
+
+With `monitoring.enabled` (default) the chart adds, for kube-prometheus-stack:
+
+- a ServiceMonitor for the web app's metrics port (9100, not exposed through the
+  ingress): turns and their duration, time until speech starts, tool calls by outcome
+  (`ok`, `refused` = normal play, `failed` = a game server unreachable), LLM tokens by
+  model and errors by kind, speech characters, open voice conversations, sign-ins,
+  worlds forged;
+- alert rules: billing/auth errors from the model (play has stopped), repeated model
+  errors, failing game servers, slow spoken turns, and the web app down. There is no
+  Alertmanager in the cluster yet, so these show as firing in Prometheus/Grafana rather
+  than notifying anyone; the Admin health banner covers model errors in the app itself;
+- a "Lore" Grafana dashboard (loaded by Grafana's dashboard sidecar).
 
 ## Event log and Redis
 

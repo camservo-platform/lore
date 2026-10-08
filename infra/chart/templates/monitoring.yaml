@@ -1,0 +1,76 @@
+{{- if .Values.monitoring.enabled }}
+{{- $ctx := dict "ctx" . "component" "monitoring" }}
+# Prometheus scrapes the web app's metrics port (not exposed through the ingress).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ include "lore.fullname" . }}-web
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "lore.selectorLabels" (dict "ctx" . "component" "web") | nindent 6 }}
+  endpoints:
+    - port: metrics
+      interval: {{ .Values.monitoring.interval }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: {{ include "lore.fullname" . }}
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  groups:
+    - name: lore
+      rules:
+        - alert: LoreModelBillingOrAuth
+          expr: sum(increase(lore_llm_errors_total{namespace="{{ .Release.Namespace }}", kind=~"billing|auth"}[10m])) > 0
+          labels: {severity: critical}
+          annotations:
+            summary: The Game Master can't reach the model (billing or API key)
+            description: LLM requests are failing with billing or authentication errors, so play has stopped. Check the Anthropic console (credit, key) and the Admin health banner.
+        - alert: LoreModelErrors
+          expr: sum(increase(lore_llm_errors_total{namespace="{{ .Release.Namespace }}", kind!~"billing|auth"}[15m])) > 3
+          labels: {severity: warning}
+          annotations:
+            summary: Repeated LLM request failures
+            description: More than 3 LLM requests failed in 15 minutes (rate limits, overload, server or network errors).
+        - alert: LoreToolsFailing
+          expr: sum(increase(lore_tool_calls_total{namespace="{{ .Release.Namespace }}", outcome="failed"}[10m])) > 0
+          labels: {severity: warning}
+          annotations:
+            summary: The GM can't reach a game server
+            description: MCP tool calls are failing (not refusals; the game or lore server is unreachable or crashing).
+        - alert: LoreSlowSpeech
+          expr: |
+            histogram_quantile(0.9, sum by (le) (rate(lore_first_narration_seconds_bucket{namespace="{{ .Release.Namespace }}", mode="speech"}[30m]))) > 15
+            and sum(rate(lore_turns_total{namespace="{{ .Release.Namespace }}", mode="speech"}[30m])) > 0
+          for: 15m
+          labels: {severity: warning}
+          annotations:
+            summary: Spoken turns are slow to start
+            description: 90% of spoken turns took more than 15 s before the GM started talking over the last 30 minutes.
+        - alert: LoreWebDown
+          expr: absent(up{namespace="{{ .Release.Namespace }}", service="{{ include "lore.fullname" . }}-web"} == 1)
+          for: 5m
+          labels: {severity: critical}
+          annotations:
+            summary: The Lore web app is down
+            description: Prometheus hasn't been able to scrape the web app for 5 minutes.
+{{- if .Values.monitoring.grafanaDashboard }}
+---
+# Picked up by Grafana's dashboard sidecar (any namespace, label grafana_dashboard=1).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "lore.fullname" . }}-grafana-dashboard
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+    grafana_dashboard: "1"
+data:
+  lore.json: |-
+    {{- .Files.Get "files/grafana-dashboard.json" | nindent 4 }}
+{{- end }}
+{{- end }}

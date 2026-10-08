@@ -41,7 +41,8 @@ from lore.gm import (
 )
 from lore.settings import Settings
 from lore.events import EventBus
-from lore.usage import Presence, Usage
+from lore import metrics
+from lore.usage import Health, Presence, Usage
 from lore.voice import Voice
 from lore.web import conversation
 from lore.web.auth import COOKIE, Auth, AuthError, parse_user_map
@@ -240,9 +241,22 @@ def create_app() -> Starlette:
     llm = anthropic.AsyncAnthropic(api_key=settings.llm_api_key)
     toolbox = Toolbox(settings.mcp_servers)
     usage = Usage(redis)
+    health = Health(redis)
+
+    async def on_usage(model: str, used: Any) -> None:
+        metrics.record_tokens(model, used)
+        await usage.llm(model, used)
+
+    async def on_model_error(error: BaseException) -> None:
+        kind = metrics.classify(error)
+        metrics.LLM_ERRORS.labels(kind).inc()
+        await health.error(kind, describe_error(error))
+
+    if os.environ.get("LORE_METRICS_PORT"):
+        metrics.serve(int(os.environ["LORE_METRICS_PORT"]))
     presence = Presence(redis)
     bus = EventBus(redis)
-    gm = GameMaster(llm, toolbox, settings.llm_model, settings.llm_effort, on_usage=usage.llm)
+    gm = GameMaster(llm, toolbox, settings.llm_model, settings.llm_effort, on_usage=on_usage)
     voice = (
         Voice(settings.deepgram_api_key, settings.tts_model) if settings.deepgram_api_key else None
     )
@@ -291,6 +305,7 @@ def create_app() -> Starlette:
 
     def signed_in(user: str, provider: str, session_id: str) -> Response:
         log.info("%s signed in (%s)", user, provider)
+        metrics.SIGNINS.labels(provider.split(":")[0]).inc()
         response = RedirectResponse("/", status_code=303)
         response.set_cookie(COOKIE, session_id, **auth.cookie_args())
         return response
@@ -377,10 +392,16 @@ def create_app() -> Starlette:
     async def forge_world(request: Request) -> Response:
         user = await user_of(request)
         body = await request.json()
-        return sse(worldgen.forge(
+        async def counted(events):
+            async for event in events:
+                if event["type"] in ("done", "error"):
+                    metrics.WORLDS.labels("ok" if event["type"] == "done" else "failed").inc()
+                yield event
+
+        return sse(counted(worldgen.forge(
             llm, settings.llm_model, toolbox, user, body.get("theme", ""), (body.get("name") or "").strip() or None,
-            on_usage=usage.llm,
-        ))
+            on_usage=on_usage, on_error=on_model_error,
+        )))
 
     async def acquire_turn(table: Table, turn_id: str, wait: float = 0) -> bool:
         """Takes the table's turn lock, waiting up to `wait` seconds for another player's turn."""
@@ -443,16 +464,23 @@ def create_app() -> Starlette:
             messages.append({"role": "system", "content": "\n\n".join(notes)})
         reply = ""
         await usage.turn(user)
+        metrics.TURNS.labels(mode).inc()
+        started, narrating = asyncio.get_running_loop().time(), False
         try:
             model = settings.llm_speech_model if mode == "speech" else settings.llm_model
             async for event in gm.turn(campaign, user, system, messages, model=model):
+                if event["type"] == "text" and not narrating:
+                    narrating = True
+                    metrics.FIRST_NARRATION.labels(mode).observe(asyncio.get_running_loop().time() - started)
                 if event["type"] == "done":
                     reply = event["text"]
                 await emit(event)
         except Exception as e:
             log.exception("turn failed")
+            await on_model_error(e)
             await emit({"type": "error", "text": describe_error(e)})
         finally:
+            metrics.TURN_SECONDS.labels(mode).observe(asyncio.get_running_loop().time() - started)
             await table.save(_complete_history(messages), mode, system, version)
             await redis.delete(table.lock)
             if reply:
@@ -544,10 +572,12 @@ def create_app() -> Starlette:
         log.info("voice session started: %s at %s", user, campaign)
         started = asyncio.get_running_loop().time()
         await presence.voice(user, True)
+        metrics.VOICE_SESSIONS.inc()
         try:
             await conversation.serve(ws, settings.deepgram_api_key, settings.stt_model, play)
         finally:
             await presence.voice(user, False)
+            metrics.VOICE_SESSIONS.dec()
             await usage.voice(asyncio.get_running_loop().time() - started)
         log.info("voice session ended: %s at %s", user, campaign)
 
@@ -640,6 +670,7 @@ def create_app() -> Starlette:
                                      narrator=await tts_voice.resolve(chosen))
         audio = tts_voice.speak(text, chosen)
         await usage.tts(len(text))
+        metrics.TTS_CHARACTERS.inc(len(text))
         # Pull the first chunk before answering so Deepgram errors become a proper status.
         first = await anext(audio)
 
@@ -790,6 +821,10 @@ def create_app() -> Starlette:
         log.info("admin %s reset the GM conversation for world %s", user, request.path_params["campaign_id"])
         return JSONResponse({"reset": True})
 
+    async def admin_health(request: Request) -> Response:
+        await require_admin(request)
+        return JSONResponse(await health.summary())
+
     async def admin_usage(request: Request) -> Response:
         await require_admin(request)
         days = max(1, min(int(request.query_params.get("days", "14")), 120))
@@ -874,6 +909,7 @@ def create_app() -> Starlette:
             Route("/api/admin/tables/{campaign_id:int}/unlock", admin_unlock_table, methods=["POST"]),
             Route("/api/admin/tables/{campaign_id:int}/reset", admin_reset_table, methods=["POST"]),
             Route("/api/admin/usage", admin_usage),
+            Route("/api/admin/health", admin_health),
             Route("/api/admin/sql", admin_sql, methods=["POST"]),
             Route("/api/admin/vector", admin_vector, methods=["POST"]),
             Mount("/static", StaticFiles(directory=STATIC), name="static"),

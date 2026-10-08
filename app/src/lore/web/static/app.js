@@ -826,6 +826,32 @@ const SQL_EXAMPLES = {
   "Sessions": "SELECT s.id, c.name AS campaign, s.started_at, s.ended_at, s.summary\nFROM game_sessions s JOIN campaigns c ON c.id = s.campaign_id ORDER BY s.started_at DESC",
 };
 
+const ERROR_KINDS = {
+  billing: "billing (out of credit?)", auth: "authentication (API key?)", rate_limit: "rate limits",
+  overloaded: "model overloaded", server: "model server errors", connection: "network", other: "other errors",
+};
+
+// Model errors in the last day, shown above the admin tabs (and to admins on sign-in).
+async function loadHealth() {
+  const banner = $("health-banner");
+  try {
+    const h = await (await api("/api/admin/health")).json();
+    const day = Object.entries(h.last_day);
+    if (!day.length) { banner.hidden = true; return h; }
+    const count = (o) => Object.values(o).reduce((a, b) => a + b, 0);
+    const hour = count(h.last_hour);
+    banner.className = `health ${hour ? "bad" : "warn"}`;
+    banner.innerHTML = `<strong>⚠ ${count(h.last_day)} model request${count(h.last_day) === 1 ? "" : "s"} failed in the last 24 h${
+      hour ? ` (${hour} in the last hour)` : ""}:</strong> ${day.map(([k, n]) => `${escapeHtml(ERROR_KINDS[k] || k)} ×${n}`).join(", ")}.
+      <br><span class="hint">Latest, ${ago(h.last.at)}: ${escapeHtml(h.last.message)}</span>`;
+    banner.hidden = false;
+    return h;
+  } catch {
+    banner.hidden = true;
+    return null;
+  }
+}
+
 async function showAdmin() {
   closeFeed();
   speaker.stop();
@@ -833,6 +859,7 @@ async function showAdmin() {
   state.campaign = null;
   showView("admin");
   $("campaign-title").textContent = "Admin";
+  loadHealth();
   history.replaceState(null, "", "/?admin");
   try {
     const data = await (await api("/api/admin/overview")).json();
@@ -1265,6 +1292,12 @@ $("usage-days").addEventListener("change", loadUsage);
     state.admin = me.admin;
     $("user").textContent = me.user;
     $("admin-link").hidden = !me.admin;
+    if (me.admin) {
+      loadHealth().then((h) => {
+        const n = h ? Object.values(h.last_hour).reduce((a, b) => a + b, 0) : 0;
+        if (n) toast(`⚠ ${n} Game Master request${n === 1 ? "" : "s"} failed in the last hour. See Admin.`);
+      });
+    }
   } catch (e) {
     toast(e.message);
   }

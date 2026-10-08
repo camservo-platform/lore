@@ -17,6 +17,7 @@ import httpx2
 from mcp import Client
 from mcp.client.streamable_http import streamable_http_client
 
+from lore import metrics
 from lore.mcp.common import USER_HEADER
 
 log = logging.getLogger(__name__)
@@ -272,8 +273,10 @@ class GameMaster:
         else:
             try:
                 result, is_error = await tools.call(block["name"], block["input"])
+                metrics.TOOL_CALLS.labels(block["name"], "refused" if is_error else "ok").inc()
             except Exception as e:  # network trouble reaching an MCP server
                 log.exception("tool %s failed", block["name"])
+                metrics.TOOL_CALLS.labels(block["name"], "failed").inc()
                 result, is_error = f"Tool unavailable: {e}", True
         if not isinstance(result, str):
             result = json.dumps(result)
