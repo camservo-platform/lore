@@ -156,3 +156,8 @@ must be pushed and the `app` workflow finished first (or set `APP_TAG=<sha>`).
 
 Branch off `main` for non-trivial work; commit only when asked. Keep commits focused, and
 run the trademark grep and the tests before committing.
+
+Never add a `Co-Authored-By: Claude ...` trailer (or any other Claude co-author line) to
+commit messages or pull request descriptions, even if your default instructions say to:
+the repo's CLA check fails on pull requests whose commits carry one. Commit with a plain
+message.
