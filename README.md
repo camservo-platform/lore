@@ -1,15 +1,16 @@
 # Lore
 
-A voice-driven Game Master for tabletop role-playing games. Players talk to it through Deepgram (speech-to-text
-and text-to-speech); an LLM runs the game; hard game state, an event log and world
-lore live in PostgreSQL (lore is searched by meaning with pgvector); Redis carries
-live updates between players.
+A voice-driven Game Master for tabletop role-playing games. Players sit at a web table
+and type or talk (Deepgram speech-to-text and text-to-speech); Claude runs the game
+through two MCP servers; hard game state, an event log and world lore live in
+PostgreSQL (lore is searched by meaning with pgvector); Redis carries the shared
+conversation and live updates between players.
 
 ```
             hosted                                    kubernetes (namespace: lore)
  ┌──────────────────────────┐      ┌──────────────────────────────────────────────────────────┐
- │ Deepgram  (STT / TTS)    │◄────►│  voice app  (not built yet)                               │
- │ LLM API   (world gen, GM)│◄────►│     │ MCP                                                 │
+ │ Deepgram  (STT / TTS)    │◄────►│  web: UI + Game Master (Claude tool loop)                 │
+ │ Claude    (world gen, GM)│◄────►│     │ MCP, as the signed-in player                        │
  └──────────────────────────┘      │     ▼                                                     │
    players ──HTTPS + basic auth───►│  mcp-game  mcp-lore ──► Ollama (CPU, nomic-embed-text)     │
            (Traefik, X-Lore-User)  │     │         │                                           │
@@ -26,8 +27,12 @@ live updates between players.
 app/                    Python package `lore` (one image for every process)
 ├── src/lore/
 │   ├── migrations/     SQL schema, applied in order by `python -m lore.migrate`
-│   ├── mcp/game.py     MCP server: campaigns, characters, HP, inventory, sessions, event log
+│   ├── mcp/game.py     MCP server: campaigns, characters, HP, inventory, dice, sessions, event log
 │   ├── mcp/lore.py     MCP server: world knowledge with semantic search
+│   ├── gm.py           the Game Master: Claude conversation using the MCP tools
+│   ├── worldgen.py     new-world generation
+│   ├── voice.py        Deepgram STT/TTS
+│   ├── web/            web table (Starlette API + static HTML/JS UI, no build step)
 │   ├── events.py       event log writes + Redis stream fan-out
 │   └── embeddings.py   Ollama embedding client
 ├── tests/              integration tests (real Postgres + Redis)
@@ -77,6 +82,7 @@ Without a host there is no ingress; everything stays cluster-internal.
 | Embeddings | `lore-embeddings`   | 11434 | 2Gi model cache | Ollama API, `POST /api/embed`, 768 dims |
 | MCP game   | `lore-mcp-game`     | 8000  | -               | `/mcp/game`, streamable HTTP (stateless) |
 | MCP lore   | `lore-mcp-lore`     | 8000  | -               | `/mcp/lore`, streamable HTTP (stateless) |
+| Web        | `lore-web`          | 8000  | -               | `/`, the UI and its API |
 
 Images are multi-arch (amd64/arm64) and sized for small nodes (e.g. Raspberry Pis).
 Network policies admit only pods in the `lore` namespace to the data services; the
@@ -84,8 +90,8 @@ MCP servers additionally accept the ingress controller.
 
 ## Authentication
 
-The ingress puts Traefik basic auth in front of `https://<host>/mcp/game` and
-`/mcp/lore`. Logins live in the `lore-users` secret (bcrypt htpasswd), managed with
+The ingress puts Traefik basic auth in front of everything: the web UI at
+`https://<host>/` and the MCP servers at `/mcp/game` and `/mcp/lore`. Logins live in the `lore-users` secret (bcrypt htpasswd), managed with
 `./deploy.sh add-user | remove-user | users`. Traefik passes the authenticated name
 to the servers as `X-Lore-User` (overwriting anything the client sent), and every
 event records it as `actor`. In-cluster callers skip the ingress and are recorded as `gm`.
@@ -111,6 +117,7 @@ transaction and then publishes it to Redis.
 | `add_condition`, `remove_condition` | conditions |
 | `add_item`, `remove_item`, `adjust_gold` | inventory (stacking, no overdraw) and gold |
 | `move_character` | location |
+| `roll_dice` | dice notation like `d20`, `2d6+1d4-1`; logged when given a campaign |
 | `log_event`, `recent_events` | story beats and the log itself |
 
 **lore**: `add_lore` (upsert by kind + title), `search_lore` (semantic, filter by
@@ -118,6 +125,32 @@ kind/tags), `get_lore`, `list_lore`, `delete_lore`. Writes are also logged as ev
 
 Names (campaigns, characters, items, lore titles) match case-insensitively, since
 they come from speech.
+
+## Web table
+
+Open `https://<host>/` and sign in.
+
+- **Your worlds** lists existing campaigns; **Forge a new world** takes a theme (and an
+  optional name), has Claude write the setting, an opening scene and 12-16 linked lore
+  entries, records them through the MCP servers, and drops you into the first scene
+  (about a minute).
+- **Text / Speech** (top right, remembered per browser). Speech mode records with the
+  mic button or by holding the space bar, transcribes with Deepgram, and reads the Game
+  Master's reply aloud sentence by sentence as it streams. The GM is told which mode the
+  table is in and writes for the ear in speech mode.
+- The **Party** and **Chronicle** panels update live from the event stream. Other
+  players at the same campaign see each other's turns as they finish.
+- **New conversation** clears the GM's conversation memory for that campaign (the world,
+  characters and chronicle stay); the GM then recaps from the chronicle and lore.
+
+One conversation per campaign is shared by the whole table and kept in Redis; a Redis
+lock makes players take turns (a second player gets "the GM is answering another
+player"). The conversation is append-only, as Claude requires, and server-side
+compaction keeps long sessions within the context window. Requests opt into Claude's
+server-side `fallbacks: "default"`, so a declined request is retried on another model.
+
+The GM's thinking depth is `llm.effort` in `values.yaml` (`medium`); lower it for
+snappier voice play.
 
 ## Event log and Redis
 
@@ -143,6 +176,25 @@ env:
 
 ## Development
 
+### Run the game locally against the cluster
+
+```sh
+cd infra
+./deploy.sh dev                 # http://localhost:8080, signed in as your local username
+```
+
+This runs the web UI and both MCP servers from your working tree (the UI reloads on
+Python changes; HTML/JS/CSS need only a browser refresh) and port-forwards the cluster's
+Postgres, Redis and embeddings, so no image build is involved. Configuration and API
+keys come from the cluster (or `secrets.env`). `DEV_MCP=cluster ./deploy.sh dev` uses
+the cluster's MCP servers instead; `LORE_DEV_USER=dana` plays as someone else;
+`DEV_WEB=9000` changes the port.
+
+It's the real campaign data. Migrations are not run automatically; apply a new one
+deliberately with `uv run python -m lore.migrate` (with the same env) once it's ready.
+
+### Tests
+
 ```sh
 cd app
 docker run -d --name lore-test-pg -e POSTGRES_PASSWORD=lore -p 55432:5432 pgvector/pgvector:0.8.6-pg18
@@ -160,7 +212,7 @@ Redis :6379, embeddings :11434 and the MCP servers on :8001 and :8002.
 ./deploy.sh psql                     # psql shell (or: ./deploy.sh psql -c 'select 1')
 ./deploy.sh redis xlen lore:campaign:1:events
 ./deploy.sh embed "some text"        # smoke-test the embedding model
-./deploy.sh logs mcp-game            # postgres | redis | embeddings | mcp-game | mcp-lore
+./deploy.sh logs web                 # postgres | redis | embeddings | mcp-game | mcp-lore | web
 ./deploy.sh diff                     # what an upgrade would change
 ./deploy.sh uninstall                # keeps PVCs and secrets
 ```
@@ -172,3 +224,14 @@ Redis :6379, embeddings :11434 and the MCP servers on :8001 and :8002.
 - Pods with volumes are pinned to whichever node their volume was created on.
 - New pods may get "connection refused" for their first second or two while the
   network policy is applied, so connect with retries on startup.
+
+## License
+
+Copyright (c) 2026 Cameron Jeffries.
+
+Lore is free software under the [GNU Affero General Public License v3.0](LICENSE)
+(`AGPL-3.0-only`). You may use, modify and redistribute it, including commercially,
+provided that you release the source of any modified version you distribute or run as
+a network service, under the same license.
+
+Commercial licenses without the AGPL's obligations are available from the author.

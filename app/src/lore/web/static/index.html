@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lore</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>🕯️</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:wght@500;600;700&family=Inter:wght@400;500;600&display=swap">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <button class="brand" id="home" title="Back to your worlds">Lore</button>
+    <div class="campaign-title" id="campaign-title"></div>
+    <div class="controls">
+      <div class="mode" role="radiogroup" aria-label="Table mode">
+        <button role="radio" data-mode="text" aria-checked="true">Text</button>
+        <button role="radio" data-mode="speech" aria-checked="false">Speech</button>
+      </div>
+      <span class="user" id="user"></span>
+    </div>
+  </header>
+
+  <main id="lobby" class="lobby">
+    <section class="panel">
+      <h2>Your worlds</h2>
+      <p class="hint">Return to a campaign already in progress.</p>
+      <ul class="worlds" id="worlds"><li class="empty">Loading…</li></ul>
+    </section>
+
+    <section class="panel">
+      <h2>Forge a new world</h2>
+      <p class="hint">Describe the world you want to play in. The Game Master writes its places, people and plots, then opens the first scene.</p>
+      <form id="forge">
+        <label>Theme
+          <textarea name="theme" rows="4" placeholder="A drowned archipelago where lighthouse keepers guard the last dry land, and something below the waves is waking."></textarea>
+        </label>
+        <label>Name <span class="optional">(optional)</span>
+          <input name="name" maxlength="60" placeholder="Leave blank to let the Game Master choose">
+        </label>
+        <button type="submit" class="primary">Forge world</button>
+      </form>
+      <ol class="progress" id="forge-progress" hidden></ol>
+    </section>
+  </main>
+
+  <main id="table" class="table" hidden>
+    <section class="story">
+      <div class="transcript" id="transcript" aria-live="polite"></div>
+      <div class="activity" id="activity" hidden></div>
+
+      <form class="composer" id="composer" data-mode="text">
+        <textarea id="message" rows="2" placeholder="What do you do?"></textarea>
+        <button type="submit" class="primary" id="send">Send</button>
+      </form>
+      <div class="talk" id="talk" hidden>
+        <button class="mic" id="mic" aria-pressed="false">
+          <span class="mic-dot"></span><span id="mic-label">Tap to speak</span>
+        </button>
+        <p class="hint">Or hold the space bar while you talk.</p>
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <section>
+        <h3>Party</h3>
+        <ul class="party" id="party"></ul>
+      </section>
+      <section>
+        <h3>Chronicle</h3>
+        <ol class="log" id="log"></ol>
+      </section>
+      <section class="table-actions">
+        <button id="new-session" title="Clear the Game Master's memory of this conversation. The world, characters and chronicle are kept.">New conversation</button>
+      </section>
+    </aside>
+  </main>
+
+  <div class="toast" id="toast" role="alert" hidden></div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

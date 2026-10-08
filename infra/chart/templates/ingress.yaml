@@ -33,6 +33,13 @@ spec:
     - host: {{ .host }}
       http:
         paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "lore.fullname" $ }}-web
+                port:
+                  name: http
           {{- range $name, $server := $.Values.mcp.servers }}
           - path: {{ $server.path }}
             pathType: Prefix

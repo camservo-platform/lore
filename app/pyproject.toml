@@ -2,8 +2,10 @@
 name = "lore"
 version = "0.1.0"
 description = "Voice-driven tabletop RPG Game Master: game state and lore MCP servers"
+license = "AGPL-3.0-only"
 requires-python = ">=3.13"
 dependencies = [
+    "anthropic==1.8.0",
     "asyncpg>=0.31.0",
     "httpx>=0.28.1",
     "mcp==2.2.0",

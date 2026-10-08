@@ -21,13 +21,14 @@ spec:
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: {{ include "lore.fullname" . }}-mcp
+  name: {{ include "lore.fullname" . }}-public
   labels:
-    {{- include "lore.labels" (dict "ctx" . "component" "mcp") | nindent 4 }}
+    {{- include "lore.labels" (dict "ctx" . "component" "public") | nindent 4 }}
 spec:
+  # The web UI and MCP servers: reachable from this namespace and the ingress controller.
   podSelector:
     matchLabels:
-      lore/mcp: "true"
+      lore/public: "true"
   policyTypes: [Ingress]
   ingress:
     - from:

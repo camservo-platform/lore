@@ -13,7 +13,10 @@
 #   ./deploy.sh redis [args]      redis-cli (e.g. ./deploy.sh redis keys 'lore:*')
 #   ./deploy.sh embed <text>      smoke-test the embedding model
 #   ./deploy.sh forward           port-forward Postgres, Redis, embeddings and MCP servers
-#   ./deploy.sh logs [comp]       tail logs (postgres|redis|embeddings|mcp-game|mcp-lore)
+#   ./deploy.sh dev               run the game locally (web + MCP servers, live reload) against
+#                                 the cluster's Postgres, Redis and embeddings; DEV_MCP=cluster
+#                                 uses the cluster's MCP servers instead of local ones
+#   ./deploy.sh logs [comp]       tail logs (postgres|redis|embeddings|mcp-game|mcp-lore|web)
 #   ./deploy.sh uninstall         remove the release (PVCs, credentials and users are kept)
 #
 # Local, gitignored files picked up when present:
@@ -254,6 +257,52 @@ cmd_forward() {
   wait
 }
 
+# Local ports for `dev`, chosen to stay clear of anything already running locally.
+DEV_PG=15432 DEV_REDIS=16379 DEV_EMBED=21434 DEV_GAME=18001 DEV_LORE=18002 DEV_WEB=${DEV_WEB:-8080}
+
+cmd_dev() {
+  local mcp="${DEV_MCP:-local}" pids=() cfg
+  cfg="$(kc get configmap "$RELEASE"-config -o json)"
+  cfgval() { python3 -c 'import json,sys; print(json.load(sys.stdin)["data"].get(sys.argv[1], ""))' "$1" <<<"$cfg"; }
+
+  log "Port-forwarding cluster services"
+  kc port-forward svc/"$RELEASE"-postgres $DEV_PG:5432 >/dev/null & pids+=($!)
+  kc port-forward svc/"$RELEASE"-redis $DEV_REDIS:6379 >/dev/null & pids+=($!)
+  kc port-forward svc/"$RELEASE"-embeddings $DEV_EMBED:11434 >/dev/null & pids+=($!)
+  if [[ "$mcp" == cluster ]]; then
+    kc port-forward svc/"$RELEASE"-mcp-game $DEV_GAME:8000 >/dev/null & pids+=($!)
+    kc port-forward svc/"$RELEASE"-mcp-lore $DEV_LORE:8000 >/dev/null & pids+=($!)
+  fi
+  trap 'kill "${pids[@]}" 2>/dev/null; wait 2>/dev/null' EXIT INT TERM
+  for port in $DEV_PG $DEV_REDIS $DEV_EMBED; do
+    for _ in $(seq 50); do nc -z 127.0.0.1 "$port" 2>/dev/null && break; sleep 0.1; done
+  done
+
+  # Same configuration the pods get, pointed at the forwarded ports. Keys come from
+  # secrets.env when set there, otherwise from the cluster.
+  export PGHOST=127.0.0.1 PGPORT=$DEV_PG PGDATABASE="$(cfgval PGDATABASE)" PGUSER="$(cfgval PGUSER)"
+  export PGPASSWORD="$(secret_value "$SECRET" postgres-password)"
+  export REDIS_HOST=127.0.0.1 REDIS_PORT=$DEV_REDIS REDIS_PASSWORD="$(secret_value "$SECRET" redis-password)"
+  export EMBEDDINGS_URL=http://127.0.0.1:$DEV_EMBED
+  local key; for key in EMBEDDINGS_MODEL EMBEDDINGS_DIMENSIONS EMBEDDINGS_DOCUMENT_PREFIX EMBEDDINGS_QUERY_PREFIX \
+      LLM_PROVIDER LLM_MODEL LLM_EFFORT DEEPGRAM_STT_MODEL DEEPGRAM_TTS_MODEL; do
+    export "$key=$(cfgval "$key")"
+  done
+  export LLM_API_KEY="${LLM_API_KEY:-$(secret_value "$SECRET" llm-api-key)}"
+  export DEEPGRAM_API_KEY="${DEEPGRAM_API_KEY:-$(secret_value "$SECRET" deepgram-api-key)}"
+  export MCP_GAME_URL=http://127.0.0.1:$DEV_GAME/mcp/game MCP_LORE_URL=http://127.0.0.1:$DEV_LORE/mcp/lore
+  export LORE_DEV_USER="${LORE_DEV_USER:-$(whoami)}" LORE_RELOAD=1
+
+  cd ../app
+  if [[ "$mcp" != cluster ]]; then
+    PORT=$DEV_GAME uv run python -m lore.mcp.game & pids+=($!)
+    PORT=$DEV_LORE uv run python -m lore.mcp.lore & pids+=($!)
+  fi
+  log "Game on http://localhost:$DEV_WEB as '$LORE_DEV_USER' (MCP: $mcp; Ctrl-C to stop)"
+  warn "This is the cluster's real data. Migrations are not run; use 'uv run python -m lore.migrate' deliberately."
+  PORT=$DEV_WEB HOST=127.0.0.1 uv run python -m lore.web
+}
+
 cmd_logs() {
   local comp="${1:-postgres}"
   kc logs -f -l "app.kubernetes.io/name=$comp,app.kubernetes.io/instance=$RELEASE" \
@@ -279,7 +328,8 @@ case "${1:-deploy}" in
   redis)       shift; cmd_redis "$@" ;;
   embed)       shift; cmd_embed "$@" ;;
   forward)     cmd_forward ;;
+  dev)         cmd_dev ;;
   logs)        cmd_logs "${2:-}" ;;
   uninstall)   cmd_uninstall ;;
-  *) sed -n '2,24p' "$0"; exit 1 ;;
+  *) sed -n '2,26p' "$0"; exit 1 ;;
 esac

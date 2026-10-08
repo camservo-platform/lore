@@ -4,6 +4,8 @@ the event log. Every state change records an event in the same transaction.
 Run with `python -m lore.mcp.game`.
 """
 
+import re
+import secrets
 from collections.abc import Callable
 from typing import Any
 
@@ -26,6 +28,7 @@ Authoritative game state for a tabletop role-playing campaign. Never track HP, i
 conditions or location in your head: read them here and change them only through
 these tools, which also write the campaign's event log. Use log_event for story
 beats that change no numbers (an NPC met, a quest accepted, a door opened).
+Use roll_dice for every random outcome; never invent a roll.
 Names are matched case-insensitively."""
 
 
@@ -87,7 +90,7 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
     @server.tool()
     async def list_campaigns(ctx: Context) -> list[dict[str, Any]]:
         """Lists all campaigns with their setting."""
-        rows = await state(ctx).pool.fetch("SELECT name, setting FROM campaigns ORDER BY created_at")
+        rows = await state(ctx).pool.fetch("SELECT id, name, setting FROM campaigns ORDER BY created_at")
         return [dict(r) for r in rows]
 
     @server.tool()
@@ -105,7 +108,7 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
                 conn, campaign_id=cid, actor=actor(ctx), type="campaign_created", summary=f"Campaign {name} created"
             )
         await st.bus.publish(event)
-        return {"name": name, "setting": setting}
+        return {"id": cid, "name": name, "setting": setting}
 
     # --- sessions ----------------------------------------------------------------
 
@@ -445,6 +448,34 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
 
         return await change(ctx, campaign, character, mutate)
 
+    # --- dice --------------------------------------------------------------------
+
+    @server.tool()
+    async def roll_dice(
+        notation: str,
+        reason: str,
+        ctx: Context,
+        campaign: str | None = None,
+        character: str | None = None,
+    ) -> dict[str, Any]:
+        """Rolls dice such as "d20", "1d20+5", "2d6+1d4-1". Pass `campaign` (and the rolling
+        `character`) to record the roll in the event log so players can see it was fair."""
+        rolls, modifier = parse_and_roll(notation)
+        total = sum(r for group in rolls for r in group["results"]) + modifier
+        result = {"notation": notation, "rolls": rolls, "modifier": modifier, "total": total}
+        if campaign:
+            st = state(ctx)
+            async with st.pool.acquire() as conn, conn.transaction():
+                cid = await campaign_id(conn, campaign)
+                char_id = (await load_character(conn, cid, character))["id"] if character else None
+                who = character or "The GM"
+                event = await events.record(
+                    conn, campaign_id=cid, character_id=char_id, actor=actor(ctx), type="roll",
+                    summary=f"{who} rolled {notation} for {reason}: {total}", data=result | {"reason": reason},
+                )
+            await st.bus.publish(event)
+        return result
+
     # --- event log ---------------------------------------------------------------
 
     @server.tool()
@@ -493,6 +524,35 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
         return [events.event_dict(r) for r in reversed(rows)]
 
     return server
+
+
+DICE_TERM = re.compile(r"([+-])?\s*(?:(\d*)d(\d+)|(\d+))", re.IGNORECASE)
+
+
+def parse_and_roll(notation: str) -> tuple[list[dict[str, Any]], int]:
+    """Rolls "NdM" terms and sums constant modifiers. Raises ToolError on anything else."""
+    text = notation.replace(" ", "")
+    if not text:
+        raise ToolError("Empty dice notation.")
+    rolls: list[dict[str, Any]] = []
+    modifier = 0
+    pos = 0
+    for m in DICE_TERM.finditer(text):
+        if m.start() != pos or (pos > 0 and not m.group(1)):
+            break
+        pos = m.end()
+        sign = -1 if m.group(1) == "-" else 1
+        if m.group(3):
+            count, sides = int(m.group(2) or 1), int(m.group(3))
+            if not (1 <= count <= 100 and 2 <= sides <= 1000):
+                raise ToolError("Dice must be 1-100 dice of 2-1000 sides.")
+            results = [sign * (secrets.randbelow(sides) + 1) for _ in range(count)]
+            rolls.append({"dice": f"{'-' if sign < 0 else ''}{count}d{sides}", "results": results})
+        else:
+            modifier += sign * int(m.group(4))
+    if pos != len(text) or not rolls:
+        raise ToolError(f"Can't parse dice notation {notation!r}; use forms like d20, 2d6+3, 1d8+1d6-1.")
+    return rolls, modifier
 
 
 if __name__ == "__main__":

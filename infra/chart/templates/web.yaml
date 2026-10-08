@@ -1,0 +1,73 @@
+{{- $ctx := dict "ctx" . "component" "web" }}
+{{- $v := .Values.web }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "lore.fullname" . }}-web
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  selector:
+    {{- include "lore.selectorLabels" $ctx | nindent 4 }}
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "lore.fullname" . }}-web
+  labels:
+    {{- include "lore.labels" $ctx | nindent 4 }}
+spec:
+  replicas: {{ $v.replicas }}
+  selector:
+    matchLabels:
+      {{- include "lore.selectorLabels" $ctx | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "lore.selectorLabels" $ctx | nindent 8 }}
+        lore/public: "true"
+    spec:
+      {{- include "lore.scheduling" $v | nindent 6 }}
+      {{- with .Values.app.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+      containers:
+        - name: web
+          image: {{ include "lore.image" . }}
+          command: ["python", "-m", "lore.web"]
+          envFrom:
+            - configMapRef:
+                name: {{ include "lore.fullname" . }}-config
+          env:
+            {{- include "lore.secretEnv" (list . "REDIS_PASSWORD" "redis-password") | nindent 12 }}
+            {{- include "lore.secretEnv" (list . "LLM_API_KEY" "llm-api-key") | nindent 12 }}
+            # Optional: without it the UI offers text mode only.
+            - name: DEEPGRAM_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.credentialsSecret }}
+                  key: deepgram-api-key
+                  optional: true
+          ports:
+            - name: http
+              containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          resources:
+            {{- toYaml $v.resources | nindent 12 }}

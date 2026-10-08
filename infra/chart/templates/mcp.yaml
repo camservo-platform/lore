@@ -31,7 +31,7 @@ spec:
     metadata:
       labels:
         {{- include "lore.selectorLabels" $ctx | nindent 8 }}
-        lore/mcp: "true"
+        lore/public: "true"
     spec:
       {{- include "lore.scheduling" $root.Values.mcp | nindent 6 }}
       {{- with $root.Values.app.imagePullSecrets }}

@@ -24,6 +24,9 @@ usersSecret: lore-users
 llm:
   provider: anthropic
   model: claude-opus-5-5
+  # Thinking depth per Game Master turn: low | medium | high. Lower answers faster,
+  # which matters most in speech mode.
+  effort: medium
 
 deepgram:
   # Deepgram models the app should use; exposed via lore-config.
@@ -129,6 +132,19 @@ mcp:
     limits:
       memory: 256Mi
 
+# The web table (UI + Game Master). Turns are serialised per campaign through Redis,
+# so replicas can be added freely.
+web:
+  replicas: 1
+  nodeSelector: {}
+  tolerations: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 128Mi
+    limits:
+      memory: 384Mi
+
 # Public HTTPS entry point, protected by Traefik basic auth. Disabled until a host
 # is set (in values.local.yaml). The authenticated username reaches the app as the
 # X-Lore-User header and is recorded as the actor in the event log.
@@ -141,6 +157,7 @@ ingress:
 
 # Restrict the data services to clients in this namespace, and the MCP servers to
 # this namespace plus the ingress controller (kubectl port-forward still works).
+# Same for the web UI.
 networkPolicy:
   enabled: true
   ingressController:

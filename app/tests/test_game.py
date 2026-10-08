@@ -127,3 +127,25 @@ async def test_events_are_logged_attached_to_session_and_streamed(game_tools, ca
 
     streamed = await redis.xrange(stream_key(log[0]["campaign_id"]))
     assert [json.loads(fields["event"])["id"] for _, fields in streamed] == [e["id"] for e in log]
+
+
+async def test_roll_dice_totals_and_logs(game_tools, campaign):
+    await make_fighter(game_tools, campaign)
+    r = await game_tools("roll_dice", notation="2d6+1d4-1", reason="sword", campaign=campaign, character="Brakka")
+    assert [g["dice"] for g in r["rolls"]] == ["2d6", "1d4"]
+    assert all(1 <= v <= 6 for v in r["rolls"][0]["results"]) and 1 <= r["rolls"][1]["results"][0] <= 4
+    assert r["modifier"] == -1
+    assert r["total"] == sum(r["rolls"][0]["results"]) + r["rolls"][1]["results"][0] - 1
+    [event] = await game_tools("recent_events", campaign=campaign, type="roll")
+    assert event["summary"] == f"Brakka rolled 2d6+1d4-1 for sword: {r['total']}"
+
+
+@pytest.mark.parametrize("notation", ["", "2x6", "d20 + banana", "1d1", "101d6", "5"])
+async def test_roll_dice_rejects_bad_notation(game_tools, notation):
+    with pytest.raises(ToolFailed):
+        await game_tools("roll_dice", notation=notation, reason="test")
+
+
+async def test_roll_dice_without_campaign_logs_nothing(game_tools):
+    r = await game_tools("roll_dice", notation="D20", reason="test")
+    assert 1 <= r["total"] <= 20
