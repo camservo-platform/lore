@@ -382,6 +382,7 @@ async function refreshState() {
   if (!state.campaign) return;
   try {
     const data = await (await api(`/api/campaigns/${state.campaign.id}/state?name=${encodeURIComponent(state.campaign.name)}`)).json();
+    state.undoAfter = data.undo_after;
     renderParty(data.characters);
     renderDiceCharacters(data.characters);
     updateCreator(data.characters);
@@ -711,12 +712,52 @@ $("dice-form").addEventListener("submit", (e) => {
   rollDice($("dice-notation").value.trim());
 });
 
+// Events that can't be meaningfully undone on their own.
+const NOT_UNDOABLE = new Set(["rolled_back", "campaign_created"]);
+
 function eventItem(ev, fresh) {
   const li = document.createElement("li");
   if (fresh) li.className = "fresh";
-  li.textContent = ev.summary;
+  const text = document.createElement("span");
+  text.textContent = ev.summary;
+  li.append(text);
   li.title = `${ev.actor} · ${new Date(ev.occurred_at).toLocaleString()}`;
+  // Recent events can be rolled back to (the server keeps the last turns' snapshots).
+  if (state.undoAfter !== null && state.undoAfter !== undefined && ev.id > state.undoAfter && !NOT_UNDOABLE.has(ev.type)) {
+    const undo = document.createElement("button");
+    undo.type = "button";
+    undo.className = "undo";
+    undo.textContent = "↶";
+    undo.title = "Roll back to before this";
+    undo.setAttribute("aria-label", `Roll back to before: ${ev.summary}`);
+    undo.addEventListener("click", () => rollbackTo(ev));
+    li.append(undo);
+  }
   return li;
+}
+
+async function rollbackTo(ev) {
+  if (!confirm(`Roll the world back to before this?\n\n“${ev.summary}”\n\nThat turn and everything after it is undone `
+    + "for everyone at this table: the game state, the chronicle, the quest log and the Game Master's memory of "
+    + "those turns. This can't be redone.")) return;
+  speaker.stop();
+  try {
+    await adminPost(`/api/campaigns/${state.campaign.id}/rollback`, { campaign: state.campaign.name, event_id: ev.id });
+  } catch (e) { toast(e.message); }
+  // The rolled_back event on the feed reloads the table for everyone, including us.
+}
+
+// After a rollback (by anyone): reload the transcript and the sidebar from the server.
+async function reloadTable(summary) {
+  speaker.stop();
+  talk.finishReply();
+  const lines = await recentLines(state.campaign);
+  $("transcript").innerHTML = "";
+  for (const line of lines) {
+    addMessage(line.role, line.text, line.role === "player" ? state.user : undefined, { aside: line.aside });
+  }
+  addMessage("gm", `*${summary}*`);
+  await refreshState();
 }
 
 // Live updates: game events from anyone, and turns taken by other players. The feed
@@ -744,6 +785,12 @@ function openFeed(resume = false) {
       $("campaign-title").textContent = state.campaign.name;
     }
     if (ev.type === "event" && ev.event.type === "roll" && !ev.replay) rollCard(ev.event);
+    // Also when replayed after a reconnect: what we're showing may have been undone meanwhile.
+    if (ev.type === "event" && ev.event.type === "rolled_back") {
+      toast(ev.event.summary);
+      reloadTable(ev.event.summary);
+      return;
+    }
     if (ev.type === "event") {
       $("log").prepend(eventItem(ev.event, true));
       clearTimeout(openFeed.refresh);

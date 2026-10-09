@@ -256,6 +256,14 @@ form#forge label { display: grid; gap: 4px; font-weight: 500; }
 .log { max-height: 40vh; overflow-y: auto; }
 .log li { color: var(--muted); border-left: 2px solid var(--line); padding-left: 8px; }
 .log li.fresh { border-left-color: var(--accent); color: var(--ink); }
+.log li { display: flex; justify-content: space-between; align-items: flex-start; gap: 6px; }
+.log .undo {
+  flex: none; background: none; border: 1px solid transparent; border-radius: 6px; color: var(--muted);
+  cursor: pointer; padding: 0 5px; font-size: 13px; line-height: 1.4; opacity: 0;
+}
+.log li:hover .undo, .log .undo:focus-visible { opacity: 1; border-color: var(--line); }
+.log .undo:hover { color: var(--accent); border-color: var(--accent); }
+@media (hover: none) { .log .undo { opacity: 0.7; } }
 .table-actions button {
   width: 100%; background: none; border: 1px solid var(--line); border-radius: 8px; padding: 7px; cursor: pointer; color: var(--muted);
 }

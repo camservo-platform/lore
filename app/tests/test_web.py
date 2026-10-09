@@ -191,3 +191,47 @@ def test_world_notes_list_quests_npcs_and_memories():
     assert "stub record (describe them with record_npc when you can): Pell" in notes
     assert "- alice: I promise a ring -> Oskar nods." in notes
     assert format_world_notes([], [], "", []) == ""
+
+
+async def test_the_gm_cannot_see_or_call_table_only_tools():
+    from lore.gm import TABLE_ONLY, ToolSession, Toolbox
+
+    class FakeClient:
+        async def list_tools(self):
+            class Tool:
+                def __init__(self, name):
+                    self.name, self.description, self.input_schema = name, "", {"type": "object"}
+            class Listing:
+                tools = [Tool("apply_damage"), Tool("rollback"), Tool("record_story")]
+            return Listing()
+
+    toolbox = Toolbox({"game": "http://unused"})
+    await toolbox._load({"game": FakeClient()})
+    names = [d["name"] for d in toolbox.definitions()]
+    assert "apply_damage" in names and not set(names) & TABLE_ONLY
+    result, is_error = await ToolSession({}, {"rollback": "game"}).call("rollback", {"campaign": "x", "event_id": 1})
+    assert is_error and "Unknown tool" in result
+
+
+async def test_undo_turns_trims_conversation_lines_and_feed(redis):
+    from lore.web.app import Table
+    table = Table(redis, 987654)
+    await table.reset()
+    await redis.delete(table.chat, *[k async for k in redis.scan_iter("lore:campaign:987654:user:*:lines")])
+    await table.save([{"role": "user", "content": str(i)} for i in range(6)], "text", "sys", "v1")
+    await table.add_lines("alice", {"role": "player", "text": "kept", "turn": "t1"},
+                          {"role": "gm", "text": "undone", "turn": "t2"}, {"role": "gm", "text": "old line"})
+    await table.add_lines("bob", {"role": "gm", "text": "undone too", "turn": "t3"})
+    for turn in ("t1", "t2", "t3"):
+        await redis.xadd(table.chat, {"turn": turn, "user": "alice", "message": "m", "reply": "r"})
+
+    await table.undo_turns({"t2", "t3"}, messages_kept=4)
+    assert len((await table.load())["messages"]) == 4
+    assert [line["text"] for line in await table.recent_lines("alice", 10)] == ["kept", "old line"]
+    assert await table.recent_lines("bob", 10) == []
+    assert [f["turn"] for _, f in await redis.xrange(table.chat)] == ["t1"]
+
+    # A conversation shorter than the point rolled back to was reset since: start afresh.
+    await table.undo_turns(set(), messages_kept=10)
+    assert (await table.load())["messages"] == []
+    await redis.delete(table.chat)

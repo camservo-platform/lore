@@ -981,13 +981,171 @@ def create_server(lifespan: Callable = default_lifespan) -> MCPServer:
                 f"""
                 SELECT {events.EVENT_COLUMNS} FROM events
                 WHERE campaign_id = $1 AND ($2::bigint IS NULL OR character_id = $2) AND ($3::text IS NULL OR type = $3)
+                  AND NOT {events.UNDONE}
                 ORDER BY id DESC LIMIT $4
                 """,
                 cid, char_id, type, limit,
             )
         return [events.event_dict(r) for r in reversed(rows)]
 
+    @server.tool()
+    async def save_snapshot(campaign: str, turn_id: str, ctx: Context, extra: dict[str, Any] | None = None) -> dict[str, Any]:
+        """Saves the world's state before a turn so it can be rolled back to (web table only)."""
+        async with state(ctx).pool.acquire() as conn, conn.transaction():
+            cid = await campaign_id(conn, campaign)
+            snap_id = await conn.fetchval(
+                f"""
+                INSERT INTO snapshots (campaign_id, turn_id, last_event_id, last_story_id, state, extra)
+                VALUES ($1, $2, (SELECT coalesce(max(id), 0) FROM events WHERE campaign_id = $1),
+                        (SELECT coalesce(max(id), 0) FROM story_moments WHERE campaign_id = $1),
+                        ({snapshot_sql()}), $3)
+                RETURNING id
+                """,
+                cid, turn_id, extra or {},
+            )
+            await conn.execute(
+                "DELETE FROM snapshots WHERE campaign_id = $1 AND id NOT IN"
+                " (SELECT id FROM snapshots WHERE campaign_id = $1 ORDER BY id DESC LIMIT $2)",
+                cid, SNAPSHOTS_KEPT,
+            )
+        return {"id": snap_id}
+
+    @server.tool()
+    async def rollback_window(campaign: str, ctx: Context) -> dict[str, Any]:
+        """Which events can still be rolled back: those after `after_event_id` (web table only)."""
+        async with state(ctx).pool.acquire() as conn:
+            cid = await campaign_id(conn, campaign)
+            floor = await conn.fetchval("SELECT min(last_event_id) FROM snapshots WHERE campaign_id = $1", cid)
+        return {"after_event_id": floor}
+
+    @server.tool()
+    async def rollback(campaign: str, event_id: int, ctx: Context) -> dict[str, Any]:
+        """Puts the world back as it was before the turn in which `event_id` happened, undoing it and
+        everything since (web table only). Returns the snapshot's extra state and the undone turns."""
+        st = state(ctx)
+        async with st.pool.acquire() as conn:
+            cid = await campaign_id(conn, campaign)
+            target = await conn.fetchrow(
+                f"SELECT id, summary FROM events WHERE campaign_id = $1 AND id = $2 AND NOT {events.UNDONE}",
+                cid, event_id,
+            )
+            if target is None:
+                raise ToolError("That event isn't in this world's chronicle (or was already undone).")
+            snap = await conn.fetchrow(
+                "SELECT id, turn_id, last_event_id, last_story_id, state, extra FROM snapshots"
+                " WHERE campaign_id = $1 AND last_event_id < $2 ORDER BY id DESC LIMIT 1", cid, event_id,
+            )
+            if snap is None:
+                raise ToolError("That's too far back to undo.")
+            saved = snap["state"]
+            current = {r["id"]: (r["title"], r["content"]) for r in await conn.fetch(
+                "SELECT id, title, content FROM lore_entries WHERE campaign_id = $1", cid)}
+        # Lore whose text changed since needs its embedding again: compute it before the transaction.
+        embeddings = {}
+        for row in saved["lore_entries"]:
+            if current.get(row["id"]) != (row["title"], row["content"]):
+                embeddings[row["id"]] = await st.embedder.embed_document(f"{row['title']}\n\n{row['content']}")
+        async with st.pool.acquire() as conn:
+            async with conn.transaction():
+                # Parents first (other rows point at them), then lore, then the replaced children.
+                for table in IN_PLACE:
+                    await restore_rows(conn, cid, table, saved[table])
+                lore = saved["lore_entries"]
+                await conn.execute("DELETE FROM lore_entries WHERE campaign_id = $1 AND NOT (id = ANY($2::bigint[]))",
+                                   cid, [r["id"] for r in lore])
+                for row in lore:
+                    if row["id"] in embeddings:
+                        await conn.execute(
+                            """
+                            INSERT INTO lore_entries
+                                (id, campaign_id, kind, title, content, tags, embedding, created_at, updated_at)
+                            OVERRIDING SYSTEM VALUE VALUES ($1, $2, $3, $4, $5, $6, $7, $8::text::timestamptz, $9::text::timestamptz)
+                            ON CONFLICT (id) DO UPDATE SET kind = EXCLUDED.kind, title = EXCLUDED.title,
+                                content = EXCLUDED.content, tags = EXCLUDED.tags, embedding = EXCLUDED.embedding,
+                                updated_at = EXCLUDED.updated_at
+                            """,
+                            row["id"], cid, row["kind"], row["title"], row["content"], row["tags"],
+                            embeddings[row["id"]], row["created_at"], row["updated_at"],
+                        )
+                    else:
+                        await conn.execute("UPDATE lore_entries SET kind = $2, tags = $3 WHERE id = $1",
+                                           row["id"], row["kind"], row["tags"])
+                for table in REPLACED:
+                    await restore_rows(conn, cid, table, saved[table])
+                await conn.execute("DELETE FROM story_moments WHERE campaign_id = $1 AND id > $2",
+                                   cid, snap["last_story_id"])
+                undone_turns = [r["turn_id"] for r in await conn.fetch(
+                    "DELETE FROM snapshots WHERE campaign_id = $1 AND id > $2 RETURNING turn_id", cid, snap["id"])]
+                last = await conn.fetchval("SELECT max(id) FROM events WHERE campaign_id = $1", cid)
+                await conn.execute(
+                    "INSERT INTO rollbacks (campaign_id, kept_event_id, last_event_id, actor) VALUES ($1, $2, $3, $4)",
+                    cid, snap["last_event_id"], last, actor(ctx),
+                )
+                event = await events.record(
+                    conn, campaign_id=cid, actor=actor(ctx), type="rolled_back",
+                    summary=f"{actor(ctx)} rolled the world back to before: {target['summary']}",
+                    data={"event_id": event_id, "kept_event_id": snap["last_event_id"], "undone_to": last},
+                )
+        await st.bus.publish(event)
+        return {"extra": snap["extra"], "turns": [snap["turn_id"], *undone_turns], "event": event}
+
     return server
+
+
+# --- snapshots and rollback -------------------------------------------------------
+# A snapshot is the world's changeable state before a turn. Tables whose rows other rows
+# point at (events, notes) are restored in place by id; the rest are replaced wholesale.
+
+SNAPSHOTS_KEPT = 50  # how many turns back a world can be rolled
+IN_PLACE = ("game_sessions", "characters", "quests")      # restored by id, extras deleted
+REPLACED = {                                               # deleted and re-inserted
+    "character_abilities": "character_id IN (SELECT id FROM characters WHERE campaign_id = $1)",
+    "inventory_items": "character_id IN (SELECT id FROM characters WHERE campaign_id = $1)",
+    "quest_notes": "quest_id IN (SELECT id FROM quests WHERE campaign_id = $1)",
+    "npc_details": "lore_id IN (SELECT id FROM lore_entries WHERE campaign_id = $1)",
+    "lore_notes": "lore_id IN (SELECT id FROM lore_entries WHERE campaign_id = $1)",
+    "world_options": "campaign_id = $1",
+    "world_themes": "campaign_id = $1",
+}
+OWNED = {t: "campaign_id = $1" for t in IN_PLACE} | REPLACED
+
+
+def snapshot_sql() -> str:
+    parts = [f"'{t}', (SELECT coalesce(jsonb_agg(to_jsonb(x)), '[]') FROM {t} x WHERE {w})"
+             for t, w in OWNED.items()]
+    # Lore without its embedding (large, and recomputable): see restore_lore.
+    parts.append("'lore_entries', (SELECT coalesce(jsonb_agg(to_jsonb(x) - 'embedding'), '[]')"
+                 " FROM lore_entries x WHERE campaign_id = $1)")
+    return "SELECT jsonb_build_object(" + ", ".join(parts) + ")"
+
+
+async def columns(conn: asyncpg.Connection, table: str) -> list[str]:
+    return [r["column_name"] for r in await conn.fetch(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position", table)]
+
+
+async def restore_rows(conn: asyncpg.Connection, cid: int, table: str, rows: list[dict[str, Any]]) -> None:
+    cols = [c for c in await columns(conn, table) if c != "embedding"]
+    keep = [r["id"] for r in rows] if "id" in cols else None
+    where = OWNED.get(table, "campaign_id = $1")
+    if table in IN_PLACE:
+        await conn.execute(f"DELETE FROM {table} WHERE {where} AND NOT (id = ANY($2::bigint[]))", cid, keep)
+        if not rows:
+            return
+        sets = ", ".join(f"{c} = EXCLUDED.{c}" for c in cols if c != "id")
+        await conn.execute(
+            f"INSERT INTO {table} ({', '.join(cols)}) OVERRIDING SYSTEM VALUE"
+            f" SELECT {', '.join(cols)} FROM jsonb_populate_recordset(NULL::{table}, $1)"
+            f" ON CONFLICT (id) DO UPDATE SET {sets}", rows,
+        )
+    else:
+        await conn.execute(f"DELETE FROM {table} WHERE {where}", cid)
+        if rows:
+            overriding = "OVERRIDING SYSTEM VALUE " if "id" in cols else ""
+            await conn.execute(
+                f"INSERT INTO {table} ({', '.join(cols)}) {overriding}"
+                f"SELECT {', '.join(cols)} FROM jsonb_populate_recordset(NULL::{table}, $1)", rows,
+            )
 
 
 DICE_TERM = re.compile(r"([+-])?\s*(?:(\d*)d(\d+)|(\d+))", re.IGNORECASE)

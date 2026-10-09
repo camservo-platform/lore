@@ -163,6 +163,29 @@ class Table:
     async def reset(self) -> None:
         await self.redis.delete(self.messages, self.mode, self.system, self.version)
 
+    async def undo_turns(self, turns: set[str], messages_kept: int | None) -> None:
+        """After a rollback: the GM conversation goes back to its length before those turns (or
+        starts afresh if it was reset since), and their lines and feed entries go."""
+        raw = await self.redis.get(self.messages)
+        messages = json.loads(raw) if raw else []
+        if messages_kept is None or len(messages) < messages_kept:
+            await self.reset()  # it doesn't contain the point we went back to: recap from the chronicle
+        else:
+            await self.redis.set(self.messages, json.dumps(messages[:messages_kept]), keepttl=True)
+        async for key in self.redis.scan_iter(f"lore:campaign:{self._campaign_id}:user:*:lines"):
+            lines = [json.loads(x) for x in await self.redis.lrange(key, 0, -1)]
+            kept = [line for line in lines if line.get("turn") not in turns]
+            if len(kept) != len(lines):
+                async with self.redis.pipeline() as pipe:
+                    pipe.delete(key)
+                    if kept:
+                        pipe.rpush(key, *(json.dumps(line) for line in kept))
+                        pipe.expire(key, TRANSCRIPT_TTL)
+                    await pipe.execute()
+        gone = [entry_id for entry_id, fields in await self.redis.xrange(self.chat) if fields.get("turn") in turns]
+        if gone:
+            await self.redis.xdel(self.chat, *gone)
+
 
 def _complete_history(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Drops a trailing assistant turn whose tool calls never got results (a turn that
@@ -556,10 +579,11 @@ def create_app(drain: Drain | None = None) -> Starlette:
         name = request.query_params["name"]
         async with toolbox.session(await user_of(request)) as tools:
             try:
-                characters, events, quests = await asyncio.gather(
+                characters, events, quests, window = await asyncio.gather(
                     tools.call_json("list_characters", campaign=name),
                     tools.call_json("recent_events", campaign=name, limit=30),
                     tools.call_json("list_quests", campaign=name),
+                    tools.call_json("rollback_window", campaign=name),
                 )
                 # Full sheets (attributes, conditions, gold, inventory) for the sidebar.
                 sheets = await asyncio.gather(*(
@@ -567,7 +591,8 @@ def create_app(drain: Drain | None = None) -> Starlette:
                 ))
             except ToolCallError as e:
                 raise HTTPException(404, str(e)) from None
-        return JSONResponse({"characters": list(sheets), "events": events, "quests": quests})
+        return JSONResponse({"characters": list(sheets), "events": events, "quests": quests,
+                             "undo_after": window["after_event_id"]})
 
     async def quest_note(request: Request) -> Response:
         """A player's own note on a quest (a theory, a reminder); recorded under their name."""
@@ -612,6 +637,10 @@ def create_app(drain: Drain | None = None) -> Starlette:
                     if not name or len(name) > 40:
                         return JSONResponse({"error": "Give your character a name (up to 40 characters)."},
                                             status_code=400)
+                    table = Table(redis, int(request.path_params["campaign_id"]))
+                    saved = await table.load()
+                    await snapshot(body["campaign"], user, f"picker-{uuid.uuid4().hex}",
+                                   len(_complete_history(saved["messages"])))
                     sheet = await tools.call_json(
                         "create_character", campaign=body["campaign"], name=name, race=body.get("race", ""),
                         character_class=body.get("class", ""), player=user)
@@ -646,6 +675,36 @@ def create_app(drain: Drain | None = None) -> Starlette:
                 return False
             await asyncio.sleep(0.5)
         return True
+
+    async def snapshot(campaign: str, user: str, turn_id: str, messages: int) -> None:
+        """Saves the world before a change so it can be rolled back. Best effort: a turn still runs
+        without one (it just can't be undone)."""
+        try:
+            async with toolbox.session(user) as tools:
+                await tools.call_json("save_snapshot", campaign=campaign, turn_id=turn_id, extra={"messages": messages})
+        except Exception:
+            log.exception("couldn't save a snapshot at %s", campaign)
+
+    async def rollback(request: Request) -> Response:
+        """Rolls the world back to before the turn in which a chronicle event happened, for everyone
+        at the table: game state, lore, story memory, the GM conversation and the transcript."""
+        user = await user_of(request)
+        body = await request.json()
+        table = Table(redis, int(request.path_params["campaign_id"]))
+        lock_id = f"rollback-{uuid.uuid4().hex}"
+        if not await acquire_turn(table, lock_id, wait=10):
+            return JSONResponse({"error": "The Game Master is in the middle of a turn; try again when it's done."},
+                                status_code=409)
+        try:
+            async with toolbox.session(user) as tools:
+                result = await tools.call_json("rollback", campaign=body["campaign"], event_id=int(body["event_id"]))
+            await table.undo_turns(set(result["turns"]), (result["extra"] or {}).get("messages"))
+        except ToolCallError as e:
+            return JSONResponse({"error": str(e)}, status_code=400)
+        finally:
+            await redis.delete(table.lock)
+        log.info("%s rolled back world %s: %s", user, request.path_params["campaign_id"], result["event"]["summary"])
+        return JSONResponse({"rolled_back": result["event"]["summary"], "turns": len(result["turns"])})
 
     async def optional(coro, default: Any, what: str) -> Any:
         """Extra context that's nice to have: a failure (say, the embedding server) mustn't stop the turn."""
@@ -711,6 +770,8 @@ def create_app(drain: Drain | None = None) -> Starlette:
             text = f"({'; '.join(notes)}) {text}"
         saved = await table.load()
         messages = _complete_history(saved["messages"])
+        # So this turn can be undone: the world as it is now, and how much conversation there was.
+        await snapshot(campaign, user, turn_id, len(messages))
         current = instructions_version(campaign)
         if messages:
             # Conversations from before instructions were versioned get the update once.
@@ -759,7 +820,8 @@ def create_app(drain: Drain | None = None) -> Starlette:
             await redis.delete(table.lock)
             if reply:
                 aside = aside and bool(said)
-                lines = ([{"role": "player", "text": said}] if said else []) + [{"role": "gm", "text": reply}]
+                lines = ([{"role": "player", "text": said, "turn": turn_id}] if said else []) + [
+                    {"role": "gm", "text": reply, "turn": turn_id}]
                 await table.add_lines(user, *({**line, "aside": True} if aside else line for line in lines))
                 await redis.xadd(
                     table.chat, {"turn": turn_id, "user": user, "message": said or text, "reply": reply,
@@ -1243,6 +1305,7 @@ def create_app(drain: Drain | None = None) -> Starlette:
             Route("/api/campaigns/{campaign_id:int}/state", campaign_state),
             Route("/api/campaigns/{campaign_id:int}/options", character_options),
             Route("/api/campaigns/{campaign_id:int}/quests/note", quest_note, methods=["POST"]),
+            Route("/api/campaigns/{campaign_id:int}/rollback", rollback, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/characters", create_character, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/turn", take_turn, methods=["POST"]),
             Route("/api/campaigns/{campaign_id:int}/reset", reset_table, methods=["POST"]),

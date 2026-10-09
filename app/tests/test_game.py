@@ -323,3 +323,67 @@ async def test_items_keep_description_and_origin(game_tools, campaign):
     assert c["inventory"][0]["description"] == "It hums near water."
     with pytest.raises(ToolFailed, match="has no Rope"):
         await game_tools("describe_item", campaign=campaign, character="Brakka", item="Rope", origin="x")
+
+
+# --- snapshots and rollback ---------------------------------------------------------------
+
+async def test_rollback_restores_the_world_before_a_turn(game_tools, lore_tools, campaign):
+    await make_hero(game_tools, campaign)
+    await game_tools("add_quest", campaign=campaign, title="Lantern", summary="Find it.")
+    await lore_tools("record_npc", campaign=campaign, name="Mira", description="The miller.", note="Met at the mill.")
+    await game_tools("start_session", campaign=campaign)
+    await lore_tools("record_story", campaign=campaign, narration="The party arrives at the mill.")
+    await game_tools("save_snapshot", campaign=campaign, turn_id="turn-1", extra={"messages": 4})
+    before = await game_tools("get_character", campaign=campaign, character="Sela")
+
+    # The turn that went wrong: damage, loot, a spent ability, a quest change, an NPC change,
+    # a new character, new lore, a story moment, and the session ended.
+    hit = await game_tools("apply_damage", campaign=campaign, character="Sela", amount=5, source="misheard attack")
+    await game_tools("add_item", campaign=campaign, character="Sela", item="Cursed Ring", origin="misheard")
+    await game_tools("use_ability", campaign=campaign, character="Sela", ability="Spark Lance")
+    await game_tools("update_quest", campaign=campaign, title="Lantern", status="failed", note="Gave up.")
+    await lore_tools("update_npc", campaign=campaign, name="Mira", status="dead", note="Killed by mistake.")
+    await lore_tools("record_npc", campaign=campaign, name="Mira", description="A ghost now.")
+    await game_tools("create_character", campaign=campaign, name="Ghost", max_hp=5)
+    await lore_tools("add_lore", campaign=campaign, kind="rumor", title="Wrong rumor", content="Never happened.")
+    await lore_tools("record_story", campaign=campaign, narration="Sela was struck down by a misheard attack.")
+    await game_tools("end_session", campaign=campaign, summary="A session that never happened.")
+    await game_tools("save_snapshot", campaign=campaign, turn_id="turn-2", extra={"messages": 9})
+
+    damage_event = (await game_tools("recent_events", campaign=campaign, type="damage"))[-1]
+    result = await game_tools("rollback", campaign=campaign, event_id=damage_event["id"])
+    assert result["turns"] == ["turn-1", "turn-2"] and result["extra"] == {"messages": 4}
+
+    after = await game_tools("get_character", campaign=campaign, character="Sela")
+    assert after == before and hit["hp"] != before["hp"]
+    assert [c["name"] for c in await game_tools("list_characters", campaign=campaign)] == ["Sela"]
+    [quest] = await game_tools("list_quests", campaign=campaign)
+    assert quest["status"] == "active" and len(quest["notes"]) == 0
+    mira = await lore_tools("get_npc", campaign=campaign, name="Mira")
+    assert (mira["status"], mira["content"], [h["note"] for h in mira["history"]]) == (
+        "alive", "The miller.", ["Met at the mill."])
+    assert await lore_tools("search_lore", campaign=campaign, query="miller", kind="npc")  # re-embedded, searchable
+    assert not [e for e in await lore_tools("list_lore", campaign=campaign) if e["title"] == "Wrong rumor"]
+    moments = await lore_tools("recall_story", campaign=campaign, query="mill party struck", limit=5)
+    assert [m["narration"] for m in moments] == ["The party arrives at the mill."]
+    # The session is open again, and the log no longer shows what was undone.
+    log = await game_tools("recent_events", campaign=campaign, limit=50)
+    types = [e["type"] for e in log]
+    assert "damage" not in types and "session_ended" not in types and types[-1] == "rolled_back"
+    assert "session_started" in types
+    assert log[-1]["summary"] == "gm rolled the world back to before: " + damage_event["summary"]
+
+    # The undone turn's snapshot is gone; the one rolled back to stays for another rollback.
+    with pytest.raises(ToolFailed, match="already undone"):
+        await game_tools("rollback", campaign=campaign, event_id=damage_event["id"])
+    window = await game_tools("rollback_window", campaign=campaign)
+    assert window["after_event_id"] < damage_event["id"]
+
+
+async def test_too_old_events_cannot_be_rolled_back(game_tools, campaign):
+    await make_fighter(game_tools, campaign)
+    first = (await game_tools("recent_events", campaign=campaign))[-1]
+    assert (await game_tools("rollback_window", campaign=campaign))["after_event_id"] is None
+    await game_tools("save_snapshot", campaign=campaign, turn_id="t")
+    with pytest.raises(ToolFailed, match="too far back"):
+        await game_tools("rollback", campaign=campaign, event_id=first["id"])

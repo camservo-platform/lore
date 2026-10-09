@@ -14,6 +14,9 @@ from redis.asyncio import Redis
 log = logging.getLogger(__name__)
 
 EVENT_COLUMNS = "id, campaign_id, session_id, character_id, occurred_at, actor, type, summary, data"
+# True for an event a rollback undid. The log itself is never edited; reads skip these.
+UNDONE = ("EXISTS (SELECT 1 FROM rollbacks r WHERE r.campaign_id = events.campaign_id"
+          " AND events.id > r.kept_event_id AND events.id <= r.last_event_id)")
 
 
 def event_dict(row: asyncpg.Record) -> dict[str, Any]:

@@ -197,7 +197,8 @@ transaction and then publishes it to Redis.
 | `add_quest`, `update_quest`, `list_quests` | the party's quest log: summary, giver, reward, status and notes |
 | `move_character` | location |
 | `roll_dice` | dice notation like `d20`, `2d6+1d4-1`; logged when given a campaign |
-| `log_event`, `recent_events` | story beats and the log itself |
+| `log_event`, `recent_events` | story beats and the log itself (undone events are left out) |
+| `save_snapshot`, `rollback`, `rollback_window` | the web table's rollback (hidden from the GM, like `record_story` and `npc_appeared`) |
 
 **lore**: `add_lore` (upsert by kind + title), `search_lore` (semantic, filter by
 kind/tags), `get_lore`, `list_lore`, `delete_lore`. Writes are also logged as events.
@@ -268,6 +269,16 @@ Open `https://<host>/` and sign in.
   table notes each appearance after a turn and makes a stub for anyone new, which the
   GM is asked to fill in. NPCs keep a history (deals, debts, betrayals), and each turn
   the GM sees who's known at the party's location and who could turn up again.
+- **Rolling back**: hover a chronicle entry and click ↶ to put the world back as it was
+  before that entry's GM turn (say the voice recognition heard the wrong thing). It undoes
+  that turn and everything since, for everyone at the table: characters, abilities,
+  inventory, quests, lore and NPCs, story memory, the GM's conversation and the
+  transcript. The event log stays append-only: undone events are recorded in a
+  `rollbacks` table and left out of the chronicle and the GM's view, and a "rolled back"
+  entry says who did it. Before every GM turn (and before a character is made from the
+  picker) the game server saves a snapshot of the world (`snapshots`, the last 50 per
+  world, so that's how far back you can go); lore embeddings aren't copied but recomputed
+  for entries whose text changed. A rollback waits for any running turn to finish.
 - **Story memory**: every turn (what the player did, and what happened) is embedded
   into the world's story memory. Each turn, the moments most related to what the player
   just said are recalled for the GM, from any player or session, so decisions carry

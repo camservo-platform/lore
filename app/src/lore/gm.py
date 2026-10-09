@@ -197,6 +197,11 @@ SPEECH_STYLE = (
 TEXT_STYLE = "The table is now in text mode: your replies are read on screen. Light markdown is fine."
 
 
+# Tools the web table calls itself (after a turn, or for a rollback). The GM neither sees
+# nor may call them: it must not undo the game, and these happen without it anyway.
+TABLE_ONLY = frozenset({"save_snapshot", "rollback", "rollback_window", "record_story", "npc_appeared"})
+
+
 class Toolbox:
     """The MCP servers' tools as Claude tool definitions, called on behalf of a user."""
 
@@ -224,6 +229,8 @@ class Toolbox:
         for server, client in clients.items():
             for tool in sorted((await client.list_tools()).tools, key=lambda t: t.name):
                 self._owner[tool.name] = server
+                if tool.name in TABLE_ONLY:
+                    continue
                 definitions.append({
                     "name": tool.name,
                     "description": tool.description or "",
@@ -244,9 +251,9 @@ class ToolSession:
         self._clients = clients
         self._owner = owner
 
-    async def call(self, name: str, arguments: Any) -> tuple[Any, bool]:
-        """Returns (result, is_error)."""
-        if name not in self._owner:
+    async def call(self, name: str, arguments: Any, *, table: bool = False) -> tuple[Any, bool]:
+        """Returns (result, is_error). Only the web table itself (`table`) may call TABLE_ONLY tools."""
+        if name not in self._owner or (name in TABLE_ONLY and not table):
             return f"Unknown tool {name!r}.", True
         if not isinstance(arguments, dict):
             return {"INVALID_JSON": json.dumps(arguments)}, True
@@ -258,7 +265,7 @@ class ToolSession:
 
     async def call_json(self, tool: str, /, **arguments: Any) -> Any:
         """Calls a tool and unwraps its structured result, raising on tool errors."""
-        result, is_error = await self.call(tool, arguments)
+        result, is_error = await self.call(tool, arguments, table=True)
         if is_error:
             raise ToolCallError(str(result))
         if isinstance(result, dict) and set(result) == {"result"}:
