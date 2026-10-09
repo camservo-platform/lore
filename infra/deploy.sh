@@ -22,12 +22,24 @@
 #                                 uses the cluster's MCP servers instead of local ones
 #   ./deploy.sh logs [comp]       tail logs (postgres|redis|embeddings|mcp-game|mcp-lore|web)
 #   ./deploy.sh uninstall         remove the release (PVCs, credentials and users are kept)
+#   ./deploy.sh promote [tag]     pin stable to the image dev runs (or <tag>), show the diff and
+#                                 deploy stable after you confirm; then commit values-stable.yaml
+#
+# Environments (LORE_ENV, or a leading `--env <name>`; every command works on either):
+#   stable (default)  namespace lore, values-stable.yaml (pinned app version) + values.local.yaml
+#   dev               namespace lore-dev, values-dev.yaml + values.dev.local.yaml; deploys the
+#                     newest app build. Its first deploy copies stable's password logins.
+#   e.g. LORE_ENV=dev ./deploy.sh        ./deploy.sh --env dev add-user dana
 #
 # Local, gitignored files picked up when present:
-#   secrets.env         DEEPGRAM_API_KEY / LLM_API_KEY, stored in the cluster on deploy
-#   values.local.yaml   site settings layered over values.yaml (ingress host, annotations)
+#   secrets.env              DEEPGRAM_API_KEY / LLM_API_KEY (both environments) and
+#                            GITHUB_CLIENT_ID / _SECRET (stable; DEV_GITHUB_CLIENT_ID / _SECRET
+#                            for dev, which needs its own GitHub OAuth app), stored on deploy
+#   values.local.yaml        stable's site settings (ingress host, annotations, admins)
+#   values.dev.local.yaml    dev's site settings
 #
-# Overrides: NAMESPACE, RELEASE, KUBE_CONTEXT, APP_TAG (default: last commit CI built an image for)
+# Overrides: NAMESPACE, RELEASE, KUBE_CONTEXT, APP_TAG (default: stable's pin, or for dev the
+# last commit CI built an image for)
 set -euo pipefail
 
 cd "$(dirname "$0")"
@@ -39,13 +51,24 @@ if [[ -f secrets.env ]]; then
   set +a
 fi
 
-NAMESPACE="${NAMESPACE:-lore}"
+LORE_ENV="${LORE_ENV:-stable}"
+if [[ "${1:-}" == --env ]]; then
+  LORE_ENV="${2:?usage: $0 --env stable|dev <command>}"
+  shift 2
+fi
+STABLE_NAMESPACE=lore DEV_NAMESPACE=lore-dev
+case "$LORE_ENV" in
+  stable) DEFAULT_NAMESPACE=$STABLE_NAMESPACE LOCAL_VALUES=values.local.yaml ;;
+  dev)    DEFAULT_NAMESPACE=$DEV_NAMESPACE LOCAL_VALUES=values.dev.local.yaml ;;
+  *) echo "LORE_ENV must be stable or dev, not '$LORE_ENV'" >&2; exit 1 ;;
+esac
+NAMESPACE="${NAMESPACE:-$DEFAULT_NAMESPACE}"
 RELEASE="${RELEASE:-lore}"
 KUBE_CONTEXT="${KUBE_CONTEXT:-$(kubectl config current-context)}"
 SECRET="$(awk '/^credentialsSecret:/ {print $2}' values.yaml)"
 USERS_SECRET="$(awk '/^usersSecret:/ {print $2}' values.yaml)"
-VALUES_ARGS=(-f values.yaml)
-[[ -f values.local.yaml ]] && VALUES_ARGS+=(-f values.local.yaml)
+VALUES_ARGS=(-f values.yaml -f "values-$LORE_ENV.yaml")
+[[ -f $LOCAL_VALUES ]] && VALUES_ARGS+=(-f "$LOCAL_VALUES")
 
 kc()   { kubectl --context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
 hm()   { helm --kube-context "$KUBE_CONTEXT" -n "$NAMESPACE" "$@"; }
@@ -54,11 +77,16 @@ warn() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 # `|| true`: tr dies of SIGPIPE when head has enough, which pipefail would report as failure.
 rand() { LC_ALL=C tr -dc 'A-Za-z0-9' </dev/urandom | head -c "$1" || true; }
 
-# Images are tagged by commit. CI builds commits that touch app/ or its workflow,
-# so deploy the newest such commit.
+# Images are tagged by commit. CI builds commits that touch app/ or its workflow, so dev
+# deploys the newest such commit; stable deploys the one pinned in values-stable.yaml.
 APP_PATHS=(../app ../.github/workflows/app.yml)
+pinned_tag() { awk '/^app:/ {a = 1; next} a && /^  tag:/ {print $2; exit}' values-stable.yaml; }
 app_tag() {
   if [[ -n "${APP_TAG:-}" ]]; then echo "$APP_TAG"; return; fi
+  if [[ "$LORE_ENV" == stable ]]; then
+    pinned_tag
+    return
+  fi
   if [[ -n "$(git status --porcelain -- "${APP_PATHS[@]}")" ]]; then
     warn "app/ has uncommitted changes; they are not in any image" >&2
   fi
@@ -94,8 +122,16 @@ has_secret_key() {
 ensure_secrets() {
   local key
   kc get secret "$SECRET" >/dev/null 2>&1 || kc create secret generic "$SECRET" >/dev/null
-  kc get secret "$USERS_SECRET" >/dev/null 2>&1 \
-    || kc create secret generic "$USERS_SECRET" --from-literal=users="$(locked_user)" >/dev/null
+  if ! kc get secret "$USERS_SECRET" >/dev/null 2>&1; then
+    local users=""
+    if [[ "$LORE_ENV" == dev ]]; then
+      # Dev starts with stable's password logins (a copy: they're managed separately after).
+      users="$(kubectl --context "$KUBE_CONTEXT" -n "$STABLE_NAMESPACE" get secret "$USERS_SECRET" \
+        -o jsonpath='{.data.users}' 2>/dev/null | base64 -d || true)"
+      [[ -n "$users" ]] && log "Copying stable's password logins to dev"
+    fi
+    kc create secret generic "$USERS_SECRET" --from-literal=users="${users:-$(locked_user)}" >/dev/null
+  fi
   for key in postgres-password redis-password; do
     if ! has_secret_key "$key"; then
       log "Generating $key"
@@ -109,7 +145,8 @@ ensure_api_keys() {
   for name in deepgram llm github-client-id github-client-secret; do
     key="$name-api-key"
     case "$name" in
-      github-*) key="$name"; env="$(tr '[:lower:]-' '[:upper:]_' <<<"$name")" ;;
+      # A GitHub OAuth app has one callback URL, so dev needs its own app (DEV_GITHUB_*).
+      github-*) key="$name"; env="$( [[ "$LORE_ENV" == dev ]] && echo DEV_ )$(tr '[:lower:]-' '[:upper:]_' <<<"$name")" ;;
       *) env="$(tr '[:lower:]' '[:upper:]' <<<"$name")_API_KEY" ;;
     esac
     if [[ -n "${!env:-}" ]]; then
@@ -131,7 +168,8 @@ cmd_deploy() {
     *) echo "usage: $0 deploy [--now]" >&2; exit 1 ;;
   esac
   tag="$(app_tag)"
-  log "Context: $KUBE_CONTEXT  Namespace: $NAMESPACE  Release: $RELEASE  App: ${tag:0:12}"
+  [[ -n "$tag" ]] || { echo "No app version to deploy (values-stable.yaml has no app.tag; use promote)" >&2; exit 1; }
+  log "Environment: $LORE_ENV  Context: $KUBE_CONTEXT  Namespace: $NAMESPACE  Release: $RELEASE  App: ${tag:0:12}"
   # shellcheck disable=SC2046
   helm lint ./chart $(helm_args) >/dev/null
   ensure_namespace
@@ -351,6 +389,37 @@ cmd_logs() {
     --tail=100 --all-containers --prefix
 }
 
+# Stable gets exactly the image dev is running, once you've tried it there.
+cmd_promote() {
+  [[ "$LORE_ENV" == stable ]] || { echo "promote updates stable; run it without LORE_ENV=dev" >&2; exit 1; }
+  local tag="${1:-}" current answer
+  if [[ -z "$tag" ]]; then
+    tag="$(kubectl --context "$KUBE_CONTEXT" -n "$DEV_NAMESPACE" get deployment "$RELEASE-web" \
+      -o jsonpath='{.spec.template.spec.containers[0].image}' 2>/dev/null | sed 's/.*://')"
+    [[ -n "$tag" ]] || { echo "Can't read dev's image (is dev deployed?); pass a tag instead" >&2; exit 1; }
+  fi
+  current="$(pinned_tag)"
+  if [[ "$tag" == "$current" ]]; then
+    log "Stable is already pinned to ${tag:0:12}"
+  else
+    log "Pinning stable to ${tag:0:12} (was ${current:0:12}):"
+    git --no-pager log --oneline "${current}..${tag}" -- "${APP_PATHS[@]}" 2>/dev/null || true
+    sed -i.bak "s/^  tag: .*/  tag: $tag/" values-stable.yaml && rm -f values-stable.yaml.bak
+  fi
+  cmd_diff
+  if [[ -t 0 ]]; then
+    read -rp "Deploy stable now? [y/N] " answer
+  else
+    answer="${PROMOTE_YES:-n}"
+  fi
+  if [[ "$answer" =~ ^[yY] ]]; then
+    cmd_deploy
+    warn "Commit infra/values-stable.yaml so the pin is recorded"
+  else
+    warn "Not deployed. values-stable.yaml is pinned to ${tag:0:12}: deploy with ./deploy.sh, or git checkout it to undo"
+  fi
+}
+
 cmd_uninstall() {
   hm uninstall "$RELEASE"
   log "Release removed. PVCs and secrets '$SECRET', '$USERS_SECRET' were kept."
@@ -375,5 +444,6 @@ case "${1:-deploy}" in
   dev)         cmd_dev ;;
   logs)        cmd_logs "${2:-}" ;;
   uninstall)   cmd_uninstall ;;
-  *) sed -n '2,30p' "$0"; exit 1 ;;
+  promote)     cmd_promote "${2:-}" ;;
+  *) sed -n '2,42p' "$0"; exit 1 ;;
 esac

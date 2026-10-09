@@ -1,0 +1,5 @@
+# The stable environment: namespace lore, the public host in values.local.yaml.
+# Its app version is pinned here and only moves with `./deploy.sh promote`, which sets
+# it to the image dev is running. Commit this file after promoting.
+app:
+  tag: 133021bb9dee1b484e8e95413bfc14583d647eb7

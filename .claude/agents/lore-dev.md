@@ -107,7 +107,7 @@ reuse existing ones). Report failures with their output; don't paper over them.
 (Raspberry Pi class), so treat arm64 and low memory as the baseline. Deploys go through
 Helm via `deploy.sh`.
 
-**Namespace `lore`**, release `lore`:
+**Namespace `lore`** (stable; dev is the same in `lore-dev`), release `lore`:
 
 | Component  | Service           | Port  | Storage         | Notes |
 |------------|-------------------|-------|-----------------|-------|
@@ -139,8 +139,13 @@ add a NetworkPolicy; extend the `README.md` tables.
 **deploy.sh** (run from `infra/`): `deploy` (default), `diff`, `status`, `set-key`,
 `secret`, `add-user`/`remove-user`/`users`, `psql`, `redis`, `embed`, `forward`
 (Postgres :5432, Redis :6379, embeddings :11434, MCP :8001/:8002), `logs <comp>`,
-`uninstall`. It deploys the image of the newest commit touching `app/`, so app changes
-must be pushed and the `app` workflow finished first (or set `APP_TAG=<sha>`).
+`uninstall`, `promote`. Two environments, each a full stack with its own data: **stable**
+(namespace `lore`, the default; its app version is pinned in `values-stable.yaml`) and
+**dev** (namespace `lore-dev`, `LORE_ENV=dev` or `--env dev`; deploys the image of the
+newest commit touching `app/`, so app changes must be pushed and the `app` workflow
+finished first, or set `APP_TAG=<sha>`). Ship to dev first; `./deploy.sh promote` pins
+stable to dev's image, shows the diff and deploys on confirmation; then commit
+`values-stable.yaml`.
 
 ## Working with the cluster
 

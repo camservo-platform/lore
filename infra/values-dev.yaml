@@ -1,0 +1,7 @@
+# The dev environment: namespace lore-dev, the dev host in values.dev.local.yaml.
+# It runs the newest build of main (`LORE_ENV=dev ./deploy.sh`), with its own database,
+# Redis, embeddings, credentials and users; try changes here, then promote to stable.
+
+# Stable owns the Grafana dashboard and the alerts; a second copy would duplicate them.
+monitoring:
+  enabled: false

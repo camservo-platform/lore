@@ -59,9 +59,31 @@ $EDITOR values.local.yaml              # ingress host + annotations (see below)
 ./deploy.sh status
 ```
 
-`deploy.sh` deploys the image built from the newest commit that touched `app/` (or the
-`app` workflow), so push first and wait for the workflow to finish. Override with
-`APP_TAG=<sha>`; rebuild any commit with `gh workflow run app`.
+### Stable and dev
+
+There are two environments, each a full copy of the stack with its own data:
+
+| | Namespace | Host (in the gitignored local values) | App version |
+|---|---|---|---|
+| **stable** (default) | `lore` | `values.local.yaml` | pinned in `values-stable.yaml` |
+| **dev** | `lore-dev` | `values.dev.local.yaml` | newest build of `main` |
+
+Every `deploy.sh` command works on either: stable by default, dev with `LORE_ENV=dev` (or
+a leading `--env dev`). Changes go to dev first, then you promote that exact image:
+
+```sh
+git push                                # wait for the app workflow to build the image
+LORE_ENV=dev ./deploy.sh                # dev runs the newest build; try it there
+./deploy.sh promote                     # pin stable to dev's image, show the diff, deploy on "y"
+git commit -m "Promote ..." values-stable.yaml
+```
+
+Dev starts with an empty database and a copy of stable's password logins (managed
+separately after that). It has no monitoring (stable owns the dashboard and alerts) and
+no GitHub sign-in unless you create a second GitHub OAuth app for the dev host and put
+its keys in `secrets.env` as `DEV_GITHUB_CLIENT_ID` / `DEV_GITHUB_CLIENT_SECRET`.
+`APP_TAG=<sha>` overrides the version for one deploy; rebuild any commit with
+`gh workflow run app`.
 
 ### Deploys and live sessions
 
@@ -117,7 +139,7 @@ Without a host there is no ingress; everything stays cluster-internal.
 
 Images are multi-arch (amd64/arm64) and sized for small nodes (e.g. Raspberry Pis).
 Network policies admit only pods in the `lore` namespace to the data services; the
-MCP servers additionally accept the ingress controller.
+MCP servers additionally accept the ingress controller. Dev is the same in `lore-dev`.
 
 ## Signing in
 
